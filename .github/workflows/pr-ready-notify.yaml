@@ -79,8 +79,8 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const messages = {
-              merged: '> [!NOTE]\n> This PR has already been merged. No further review is needed.',
-              closed: '> [!NOTE]\n> This PR is currently closed. PR review has not been requested.',
+              merged: '> [!WARNING]\n> This PR has already been merged. No further review is needed.',
+              closed: '> [!WARNING]\n> This PR is currently closed. PR review has not been requested.',
               draft: '> [!WARNING]\n> This PR is currently marked as *Draft*.\n⚠️ Next steps: Convert the PR to ready-for-review status before requesting reviews.',
               approved: '> [!NOTE]\n> This PR already has all required approvals and no pending reviewers.\n> No further review is required unless changes are requested.'
             };
