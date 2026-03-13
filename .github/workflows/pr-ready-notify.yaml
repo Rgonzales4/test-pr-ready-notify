@@ -22,8 +22,10 @@ jobs:
 
     steps:
       - name: Verify this is a pull request
+        env:
+          PR_API_URL: ${{ github.event.issue.pull_request.url }}
         run: |
-          if [ -z "${{ github.event.issue.pull_request.url }}" ]; then
+          if [ -z "$PR_API_URL" ]; then
             echo "::notice::Not a pull request comment — skipping."
             exit 1
           fi
@@ -99,6 +101,10 @@ jobs:
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          PR_URL: ${{ steps.pr-info.outputs.pr_url }}
+          PR_TITLE: ${{ steps.pr-info.outputs.pr_title }}
+          PR_AUTHOR: ${{ steps.pr-info.outputs.pr_author }}
+          ADDITIONAL_INFO: ${{ steps.pr-info.outputs.additional_info }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
@@ -203,16 +209,16 @@ jobs:
             }
 
             // --- Resolve PR author & commenter to Slack mentions ---
-            const prAuthorLogin = '${{ steps.pr-info.outputs.pr_author }}';
+            const prAuthorLogin = process.env.PR_AUTHOR;
             const commenterLogin = context.payload.comment.user.login;
 
             const authorMention = await resolveToSlackMention(prAuthorLogin) || `@${prAuthorLogin}`;
             const commenterMention = await resolveToSlackMention(commenterLogin) || `@${commenterLogin}`;
 
             // --- Build Slack message ---
-            const prUrl = '${{ steps.pr-info.outputs.pr_url }}';
-            const prTitle = `${{ steps.pr-info.outputs.pr_title }}`;
-            const additionalInfo = `${{ steps.pr-info.outputs.additional_info }}`;
+            const prUrl = process.env.PR_URL;
+            const prTitle = process.env.PR_TITLE;
+            const additionalInfo = process.env.ADDITIONAL_INFO;
 
             let text = `PR by ${authorMention} is ready for review: ${prUrl} (requested by ${commenterMention})`;
             const blocks = [
@@ -279,12 +285,15 @@ jobs:
           steps.pr-info.outputs.skip == 'false' &&
           steps.pr-info.outputs.is_draft == 'false'
         uses: actions/github-script@v7
+        env:
+          CHANNEL_NAME: ${{ steps.slack-notify.outputs.channel_name }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
+            const channelName = process.env.CHANNEL_NAME;
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body: `<!-- pr-ready-notified -->\n:white_check_mark: Slack notification sent to *#${{ steps.slack-notify.outputs.channel_name }}*.`,
+              body: `<!-- pr-ready-notified -->\n:white_check_mark: Slack notification sent to *#${channelName}*.`,
             });
