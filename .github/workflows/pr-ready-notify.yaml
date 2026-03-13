@@ -81,14 +81,14 @@ jobs:
             const messages = {
               merged: `
                 > [!NOTE]
-                > This PR has already been merged. No further review is needed.`
+                > This PR has already been merged. No further review is needed.`,
               closed: `
                 > [!NOTE]
-                > This PR is currently closed. PR review has not been requested.`
+                > This PR is currently closed. PR review has not been requested.`,
               draft: `
                 > [!WARNING]
                 > This PR is currently marked as *Draft*. PR review has not been requested.
-                > ⚠️ Next steps: Convert the PR to ready-for-review status before requesting reviews.`
+                > ⚠️ Next steps: Convert the PR to ready-for-review status before requesting reviews.`,
               approved: `
                 > [!NOTE]
                 > This PR already has all required approvals and no pending reviewers.
