@@ -21,18 +21,18 @@ GitHub-hosted runners (required for `ubuntu-latest`) aren't available on private
 ### 1. Create a Slack App
 
 1. Go to [api.slack.com/apps](https://api.slack.com/apps) → **Create New App** → **From scratch**
-2. Under **OAuth & Permissions**, add these **User Token Scopes**:
+2. Under **OAuth & Permissions**, add these **Bot Token Scopes**:
    - `users:read`
    - `users:read.email`
    - `chat:write`
-3. **Install to Workspace** → copy the `xoxp-...` User OAuth Token
-4. Ensure the installing user is a member of `#platform-pr-notify`
+3. **Install to Workspace** → copy the `xoxb-...` Bot User OAuth Token
+4. Invite the bot to `#platform-pr-notify` (e.g. `/invite @YourAppName`)
 
 ### 2. Add Repository Secrets
 
 | Secret | Required | Description |
 |--------|----------|-------------|
-| `SLACK_USER_TOKEN` | Yes | The `xoxp-...` User OAuth Token from step 1 |
+| `SLACK_BOT_TOKEN` | Yes | The `xoxb-...` Bot User OAuth Token from step 1 |
 | `SLACK_CHANNEL_ID` | Yes | Channel ID for `#platform-pr-notify` (right-click channel → View channel details → copy ID at bottom) |
 | `GITHUB_SLACK_OVERRIDES` | No | JSON map for users whose emails can't be auto-resolved, e.g. `{"someuser":"UXXXXXXXX"}` |
 

@@ -96,13 +96,13 @@ jobs:
           steps.pr-info.outputs.is_draft == 'false'
         uses: actions/github-script@v7
         env:
-          SLACK_USER_TOKEN: ${{ secrets.SLACK_USER_TOKEN }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
           GITHUB_SLACK_OVERRIDES: ${{ secrets.GITHUB_SLACK_OVERRIDES }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const slackToken = process.env.SLACK_USER_TOKEN;
+            const slackToken = process.env.SLACK_BOT_TOKEN;
             const channelId = process.env.SLACK_CHANNEL_ID;
 
             // Parse optional manual overrides (JSON map: {"github-user": "USLACKID"})
