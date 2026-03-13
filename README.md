@@ -17,3 +17,7 @@ GitHub-hosted runners (required for `ubuntu-latest`) aren't available on private
 ## Setup
 
 Add a `SLACK_WEBHOOK_URL` repository secret pointing to the Slack incoming webhook for the `#platform-pr-notify` channel.
+
+## Testing
+
+To test, create a PR and comment `@pr-ready` on it.
