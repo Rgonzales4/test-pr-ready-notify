@@ -58,18 +58,6 @@ jobs:
             core.setOutput('pr_title', pr.title);
             core.setOutput('pr_author', pr.user.login);
 
-            // Find the most recent Slack ts from a previous notification
-            const comments = await github.paginate(github.rest.issues.listComments, {
-              ...context.repo, issue_number, per_page: 100,
-            });
-            let slackTs = '';
-            for (const c of comments) {
-              if (c.user.type !== 'Bot') continue;
-              const match = c.body.match(/<!-- pr-ready-slack-ts:([\d.]+) -->/);
-              if (match) slackTs = match[1];
-            }
-            core.setOutput('slack_ts', slackTs);
-
             // Strip @pr-ready line(s) case-insensitively
             const additionalInfo = context.payload.comment.body
               .split('\n')
@@ -113,13 +101,11 @@ jobs:
           PR_TITLE: ${{ steps.pr-info.outputs.pr_title }}
           PR_AUTHOR: ${{ steps.pr-info.outputs.pr_author }}
           ADDITIONAL_INFO: ${{ steps.pr-info.outputs.additional_info }}
-          EXISTING_SLACK_TS: ${{ steps.pr-info.outputs.slack_ts }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const slackToken = process.env.SLACK_BOT_TOKEN;
             const channelId = process.env.SLACK_CHANNEL_ID;
-            const existingSlackTs = process.env.EXISTING_SLACK_TS;
 
             // --- Slack API helper ---
             async function slackApi(method, options = {}) {
@@ -143,19 +129,11 @@ jobs:
               return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
             }
 
-            // --- Fetch channel name, pinned mappings, and reactions in parallel ---
-            const slackFetches = [
+            // --- Fetch channel name and pinned mappings in parallel ---
+            const [channelResult, pinsResult] = await Promise.allSettled([
               slackApi('conversations.info', { params: { channel: channelId } }),
               slackApi('pins.list', { params: { channel: channelId } }),
-            ];
-            if (existingSlackTs) {
-              slackFetches.push(
-                slackApi('reactions.get', { params: { channel: channelId, timestamp: existingSlackTs } })
-              );
-            }
-            const settled = await Promise.allSettled(slackFetches);
-            const [channelResult, pinsResult] = settled;
-            const reactionsResult = settled[2]; // undefined if not fetched
+            ]);
 
             let channelName = channelId;
             if (channelResult.status === 'fulfilled' && channelResult.value.ok) {
@@ -277,44 +255,73 @@ jobs:
             const additionalInfo = process.env.ADDITIONAL_INFO;
 
             // ==========================================================
-            // RE-REVIEW: thread reply on existing Slack message
+            // Search Slack channel for an existing message about this PR
             // ==========================================================
-            if (existingSlackTs) {
-              const messageExists = reactionsResult?.status === 'fulfilled'
-                && reactionsResult.value.ok;
+            let existingSlackTs = '';
+            let existingReactions = null;
 
-              if (messageExists) {
-                const eyesReaction = reactionsResult.value.message?.reactions
-                  ?.find(r => r.name === 'eyes');
-                const eyesMentions = eyesReaction
-                  ? eyesReaction.users.map(id => `<@${id}>`).join(', ')
-                  : '';
-
-                let threadText = 'PR is ready for re-review';
-                if (!isSameUser) {
-                  const mention = await resolveToSlackMention(commenterLogin) || `@${commenterLogin}`;
-                  threadText += ` (requested by ${mention})`;
+            try {
+              let cursor;
+              let found = false;
+              // Search up to 5 pages (500 messages) of channel history
+              for (let page = 0; page < 5 && !found; page++) {
+                const params = { channel: channelId, limit: '100' };
+                if (cursor) params.cursor = cursor;
+                const history = await slackApi('conversations.history', { params });
+                if (!history.ok) {
+                  core.warning(`conversations.history failed: ${history.error}`);
+                  break;
                 }
-                if (eyesMentions) threadText += `\ncc ${eyesMentions}`;
-                if (additionalInfo) threadText += `\n${additionalInfo}`;
-
-                const threadData = await slackApi('chat.postMessage', {
-                  body: { channel: channelId, thread_ts: existingSlackTs, text: threadText },
-                });
-                if (!threadData.ok) {
-                  core.setFailed(`Thread reply failed: ${threadData.error}`);
-                  return;
+                for (const msg of (history.messages || [])) {
+                  // Match on the PR URL in either the text fallback or block content
+                  if (msg.text?.includes(prUrl) || msg.blocks?.some(
+                    b => JSON.stringify(b).includes(prUrl)
+                  )) {
+                    existingSlackTs = msg.ts;
+                    existingReactions = msg.reactions || [];
+                    found = true;
+                    core.info(`Found existing Slack message for this PR: ts=${msg.ts}`);
+                    break;
+                  }
                 }
-                core.info(`Re-review thread reply posted: ts=${threadData.ts}`);
-                core.setOutput('is_new', 'false');
-                return;
+                cursor = history.response_metadata?.next_cursor;
+                if (!cursor) break;
               }
-
-              core.warning('Original Slack message not found, posting new message');
+            } catch (e) {
+              core.warning(`Slack channel history search failed: ${e.message}`);
             }
 
             // ==========================================================
-            // NEW MESSAGE: first notification (or deleted-message fallback)
+            // EXISTING THREAD: reply instead of creating a new message
+            // ==========================================================
+            if (existingSlackTs) {
+              const eyesReaction = existingReactions?.find(r => r.name === 'eyes');
+              const eyesMentions = eyesReaction
+                ? eyesReaction.users.map(id => `<@${id}>`).join(', ')
+                : '';
+
+              let threadText = 'PR is ready for re-review';
+              if (!isSameUser) {
+                const mention = await resolveToSlackMention(commenterLogin) || `@${commenterLogin}`;
+                threadText += ` (requested by ${mention})`;
+              }
+              if (eyesMentions) threadText += `\ncc ${eyesMentions}`;
+              if (additionalInfo) threadText += `\n${additionalInfo}`;
+
+              const threadData = await slackApi('chat.postMessage', {
+                body: { channel: channelId, thread_ts: existingSlackTs, text: threadText },
+              });
+              if (!threadData.ok) {
+                core.setFailed(`Thread reply failed: ${threadData.error}`);
+                return;
+              }
+              core.info(`Re-review thread reply posted: ts=${threadData.ts}`);
+              core.setOutput('is_new', 'false');
+              return;
+            }
+
+            // ==========================================================
+            // NEW MESSAGE: first notification for this PR
             // ==========================================================
             const authorMention = await resolveToSlackMention(prAuthorLogin) || `@${prAuthorLogin}`;
             const commenterMention = isSameUser
@@ -374,14 +381,12 @@ jobs:
         uses: actions/github-script@v7
         env:
           CHANNEL_NAME: ${{ steps.slack-notify.outputs.channel_name }}
-          SLACK_TS: ${{ steps.slack-notify.outputs.slack_ts }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const channelName = process.env.CHANNEL_NAME;
-            const slackTs = process.env.SLACK_TS;
             await github.rest.issues.createComment({
               ...context.repo,
               issue_number: context.issue.number,
-              body: `<!-- pr-ready-slack-ts:${slackTs} -->\n:white_check_mark: Slack notification sent to *#${channelName}*.`,
+              body: `:white_check_mark: Slack notification sent to *#${channelName}*.`,
             });
