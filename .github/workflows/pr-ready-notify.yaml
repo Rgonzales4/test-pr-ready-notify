@@ -155,7 +155,10 @@ jobs:
                     const separatorIdx = line.indexOf(':');
                     if (separatorIdx === -1) continue;
                     const ghUsername = line.slice(0, separatorIdx).trim().toLowerCase();
-                    const email = line.slice(separatorIdx + 1).trim();
+                    let email = line.slice(separatorIdx + 1).trim();
+                    // Slack auto-formats emails as <mailto:user@example.com|user@example.com>
+                    const mailtoMatch = email.match(/<mailto:[^|]+\|([^>]+)>/);
+                    if (mailtoMatch) email = mailtoMatch[1];
                     if (ghUsername && email) {
                       ghUsernameToEmail[ghUsername] = email;
                     }
