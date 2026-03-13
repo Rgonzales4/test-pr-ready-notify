@@ -84,10 +84,10 @@ The bot comments on the PR and does **not** send a Slack message if:
 
 | Condition | Comment posted |
 |-----------|---------------|
-| PR is merged | "This PR is already merged. PR review not requested." |
-| PR is closed | "This PR is closed. PR review not requested." |
-| PR is in draft | "PR review not requested. Make sure PR is not `In Draft` and then re-requesting reviews." |
-| All reviews approved, no pending reviewers | "This PR already has all required approvals with no pending reviewers." |
+| PR is merged | This PR has already been merged. No further review is needed.|
+| PR is closed | This PR is currently closed. PR review has not been requested.|
+| PR is in draft | This PR is currently marked as *Draft*. \n⚠️ Next steps: Convert the PR to ready-for-review status before requesting reviews. |
+| All reviews approved, no pending reviewers |This PR already has all required approvals and no pending reviewers.\n> No further review is required unless changes are requested. |
 
 ### How thread tracking works
 
