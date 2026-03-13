@@ -8,8 +8,8 @@ When someone comments `@pr-ready` on a pull request, a GitHub Actions workflow:
 
 1. Checks the PR state — skips if merged, closed, draft, or already fully approved
 2. Auto-resolves GitHub users → Slack users via email matching
-3. **First `@pr-ready`**: posts a new Slack message to the channel and subscribes the PR author to the thread
-4. **Subsequent `@pr-ready`**: replies in the existing Slack thread, mentioning anyone who reacted with :eyes: on the original message
+3. **First `@pr-ready`**: posts a new Slack message to the channel, subscribes the PR author to the thread, and comments on the PR with a confirmation (embedding the Slack message reference for future lookups)
+4. **Subsequent `@pr-ready`**: finds the stored Slack message reference from the PR comments and replies in the existing Slack thread, mentioning anyone who reacted with :eyes: on the original message
 5. Any text in the comment beyond `@pr-ready` is included as additional context
 
 ## Why a separate repo?
@@ -22,12 +22,13 @@ GitHub-hosted runners (required for `ubuntu-latest`) aren't available on private
 
 1. Go to [api.slack.com/apps](https://api.slack.com/apps) → **Create New App** → **From scratch**
 2. Under **OAuth & Permissions**, add these **Bot Token Scopes**:
-   - `channels:read`
-   - `pins:read`
-   - `reactions:read`
-   - `users:read`
-   - `users:read.email`
-   - `chat:write`
+   - `channels:read` — resolve channel name
+   - `channels:history` — View messages and other content
+   - `pins:read` — read pinned user mapping message
+   - `reactions:read` — fetch :eyes: reactions for thread replies
+   - `users:read` — look up Slack users
+   - `users:read.email` — look up Slack users by email
+   - `chat:write` — post messages and thread replies
 3. **Install to Workspace** → copy the `xoxb-...` Bot User OAuth Token
 4. Invite the bot to your notification channel (e.g. `/invite @YourAppName`)
 
@@ -88,14 +89,31 @@ The bot comments on the PR and does **not** send a Slack message if:
 | PR is in draft | "Make sure PR is not in Draft before requesting a review." |
 | All reviews approved, no pending reviewers | "This PR already has all required approvals with no pending reviewers." |
 
+### How thread tracking works
+
+On first `@pr-ready` trigger, a slack message is created that contains the current PR's URL.
+
+On subsequent `@pr-ready` triggers, the slack channel history to look for a message that contains the PR's URL, if found a reply will be sent to that message. If not, a new slack message will be created.
+
+### Required GitHub token permissions
+
+The workflow uses the default `GITHUB_TOKEN` with these permissions:
+
+| Permission | Level | Purpose |
+|------------|-------|---------|
+| `contents` | `read` | Checkout context |
+| `pull-requests` | `write` | Read PR details, post confirmation comments |
+| `issues` | `write` | Post comments on issue/PR threads |
+
 ## Testing
 
 1. Open a pull request against `master`
 2. Comment `@pr-ready` on the PR
 3. Check the Actions tab to verify the workflow ran
 4. Confirm the Slack message appeared in the channel with proper `@mentions`
-5. Confirm a threaded reply exists mentioning the PR author
-6. React with :eyes: on the Slack message
-7. Comment `@pr-ready` again on the PR
-8. Confirm a thread reply appeared mentioning the :eyes: reactors
-9. Reply in the Slack thread — verify the PR author gets a notification
+5. Confirm a PR comment was posted with the Slack notification confirmation
+6. Confirm a threaded reply exists mentioning the PR author
+7. React with :eyes: on the Slack message
+8. Comment `@pr-ready` again on the PR
+9. Confirm a thread reply appeared in the **same** Slack thread mentioning the :eyes: reactors
+10. Reply in the Slack thread — verify the PR author gets a notification

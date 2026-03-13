@@ -16,7 +16,7 @@ jobs:
 
     permissions:
       contents: read
-      pull-requests: read
+      pull-requests: write
       issues: write
 
     steps:
@@ -295,10 +295,21 @@ jobs:
             // EXISTING THREAD: reply instead of creating a new message
             // ==========================================================
             if (existingSlackTs) {
-              const eyesReaction = existingReactions?.find(r => r.name === 'eyes');
-              const eyesMentions = eyesReaction
-                ? eyesReaction.users.map(id => `<@${id}>`).join(', ')
-                : '';
+              // Fetch reactions from the existing Slack message
+              let eyesMentions = '';
+              try {
+                const reactionsData = await slackApi('reactions.get', {
+                  params: { channel: channelId, timestamp: existingSlackTs },
+                });
+                if (reactionsData.ok) {
+                  const eyesReaction = reactionsData.message?.reactions?.find(r => r.name === 'eyes');
+                  if (eyesReaction) {
+                    eyesMentions = eyesReaction.users.map(id => `<@${id}>`).join(', ');
+                  }
+                }
+              } catch (e) {
+                core.warning(`Failed to fetch reactions: ${e.message}`);
+              }
 
               let threadText = 'PR is ready for re-review';
               if (!isSameUser) {
@@ -381,12 +392,14 @@ jobs:
         uses: actions/github-script@v7
         env:
           CHANNEL_NAME: ${{ steps.slack-notify.outputs.channel_name }}
+          SLACK_TS: ${{ steps.slack-notify.outputs.slack_ts }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const channelName = process.env.CHANNEL_NAME;
+            const slackTs = process.env.SLACK_TS;
             await github.rest.issues.createComment({
               ...context.repo,
               issue_number: context.issue.number,
-              body: `:white_check_mark: Slack notification sent to *#${channelName}*.`,
+              body: `<!-- slack-notify-ts:${slackTs} -->\n:white_check_mark: Slack notification sent to *#${channelName}*.`,
             });
