@@ -79,9 +79,9 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const messages = {
-              merged: '> [!NOTE]\n> This PR is already merged.',
-              closed: '> [!NOTE]\n> This PR is closed.',
-              draft: '> [!WARNING]\n> Make sure PR is not in Draft before requesting a review.',
+              merged: '> [!NOTE]\n> This PR is already merged. PR review not requested.',
+              closed: '> [!NOTE]\n> This PR is closed. PR review not requested.',
+              draft: '> [!WARNING]\n> PR review not requested. Make sure PR is not `In Draft` and then re-requesting reviews.',
               approved: '> [!NOTE]\n> This PR already has all required approvals with no pending reviewers.',
             };
             await github.rest.issues.createComment({
