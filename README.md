@@ -53,5 +53,3 @@ GitHub-hosted runners (required for `ubuntu-latest`) aren't available on private
 4. Confirm the Slack message appeared in `#platform-pr-notify` with proper `@mentions`
 5. Confirm a threaded reply exists mentioning the PR author
 6. Reply in the Slack thread — verify the PR author gets a notification
-
-Hello World!
