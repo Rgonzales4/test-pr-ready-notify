@@ -59,14 +59,18 @@ jobs:
             core.setOutput('pr_author', pr.user.login);
 
             // Find the most recent Slack ts from a previous notification
-            const comments = await github.paginate(github.rest.issues.listComments, {
-              ...context.repo, issue_number, per_page: 100,
-            });
             let slackTs = '';
-            for (const c of comments) {
-              if (c.user.type !== 'Bot') continue;
-              const match = c.body.match(/<!-- pr-ready-slack-ts:([\d.]+) -->/);
-              if (match) slackTs = match[1];
+            try {
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                ...context.repo, issue_number, per_page: 100,
+              });
+              for (const c of comments) {
+                if (c.user.type !== 'Bot') continue;
+                const match = c.body.match(/<!-- pr-ready-slack-ts:([\d.]+) -->/);
+                if (match) slackTs = match[1];
+              }
+            } catch (e) {
+              core.warning(`Failed to search PR comments for slack_ts: ${e.message}`);
             }
             core.setOutput('slack_ts', slackTs);
 
@@ -119,7 +123,7 @@ jobs:
           script: |
             const slackToken = process.env.SLACK_BOT_TOKEN;
             const channelId = process.env.SLACK_CHANNEL_ID;
-            const existingSlackTs = process.env.EXISTING_SLACK_TS;
+            let existingSlackTs = process.env.EXISTING_SLACK_TS;
 
             // --- Slack API helper ---
             async function slackApi(method, options = {}) {
@@ -279,12 +283,16 @@ jobs:
             // ==========================================================
             // RE-REVIEW: thread reply on existing Slack message
             // ==========================================================
+            let messageExists = false;
+            let reactionsData = null;
+
             if (existingSlackTs) {
-              const messageExists = reactionsResult?.status === 'fulfilled'
+              messageExists = reactionsResult?.status === 'fulfilled'
                 && reactionsResult.value.ok;
+              if (messageExists) reactionsData = reactionsResult.value;
 
               if (messageExists) {
-                const eyesReaction = reactionsResult.value.message?.reactions
+                const eyesReaction = reactionsData?.message?.reactions
                   ?.find(r => r.name === 'eyes');
                 const eyesMentions = eyesReaction
                   ? eyesReaction.users.map(id => `<@${id}>`).join(', ')
@@ -310,11 +318,79 @@ jobs:
                 return;
               }
 
-              core.warning('Original Slack message not found, posting new message');
+              core.warning('Original Slack message not found via GitHub comment, trying Slack channel history...');
             }
 
             // ==========================================================
-            // NEW MESSAGE: first notification (or deleted-message fallback)
+            // FALLBACK: search Slack channel for an existing message about this PR
+            // ==========================================================
+            if (!existingSlackTs || !messageExists) {
+              try {
+                let cursor;
+                const prUrlToFind = process.env.PR_URL;
+                let found = false;
+                // Search up to 5 pages (500 messages) of channel history
+                for (let page = 0; page < 5 && !found; page++) {
+                  const params = { channel: channelId, limit: '100' };
+                  if (cursor) params.cursor = cursor;
+                  const history = await slackApi('conversations.history', { params });
+                  if (!history.ok) break;
+                  for (const msg of (history.messages || [])) {
+                    if (msg.text?.includes(prUrlToFind) || msg.blocks?.some(
+                      b => JSON.stringify(b).includes(prUrlToFind)
+                    )) {
+                      existingSlackTs = msg.ts;
+                      found = true;
+                      core.info(`Found existing Slack message via channel history: ts=${msg.ts}`);
+                      // Verify the message is still accessible
+                      const verify = await slackApi('reactions.get', {
+                        params: { channel: channelId, timestamp: msg.ts },
+                      });
+                      if (verify.ok) {
+                        messageExists = true;
+                        reactionsData = verify;
+                      }
+                      break;
+                    }
+                  }
+                  cursor = history.response_metadata?.next_cursor;
+                  if (!cursor) break;
+                }
+              } catch (e) {
+                core.warning(`Slack channel history search failed: ${e.message}`);
+              }
+            }
+
+            // If we found an existing message (from fallback), reply in thread
+            if (existingSlackTs && messageExists) {
+              const eyesReaction = reactionsData?.message?.reactions
+                ?.find(r => r.name === 'eyes');
+              const eyesMentions = eyesReaction
+                ? eyesReaction.users.map(id => `<@${id}>`).join(', ')
+                : '';
+
+              let threadText = 'PR is ready for re-review';
+              if (!isSameUser) {
+                const mention = await resolveToSlackMention(commenterLogin) || `@${commenterLogin}`;
+                threadText += ` (requested by ${mention})`;
+              }
+              if (eyesMentions) threadText += `\ncc ${eyesMentions}`;
+              if (additionalInfo) threadText += `\n${additionalInfo}`;
+
+              const threadData = await slackApi('chat.postMessage', {
+                body: { channel: channelId, thread_ts: existingSlackTs, text: threadText },
+              });
+              if (!threadData.ok) {
+                core.setFailed(`Thread reply failed: ${threadData.error}`);
+                return;
+              }
+              core.info(`Re-review thread reply posted (via fallback): ts=${threadData.ts}`);
+              core.setOutput('is_new', 'false');
+              return;
+            }
+
+            // ==========================================================
+            // NEW MESSAGE: first notification (no existing message found)
             // ==========================================================
             const authorMention = await resolveToSlackMention(prAuthorLogin) || `@${prAuthorLogin}`;
             const commenterMention = isSameUser
