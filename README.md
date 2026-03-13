@@ -99,5 +99,3 @@ The bot comments on the PR and does **not** send a Slack message if:
 7. Comment `@pr-ready` again on the PR
 8. Confirm a thread reply appeared mentioning the :eyes: reactors
 9. Reply in the Slack thread — verify the PR author gets a notification
-
-Hello World!
