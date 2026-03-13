@@ -349,7 +349,7 @@ jobs:
                 type: 'section',
                 text: {
                   type: 'mrkdwn',
-                  text: `*PR by ${authorMention} is ready for review:* <${prUrl}|${escapedTitle}>${requestedBy}`,
+                  text: `*PR by ${authorMention} is ready for review:* ${prUrl}`,
                 },
               },
             ];
