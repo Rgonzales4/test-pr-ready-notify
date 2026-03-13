@@ -91,6 +91,7 @@ jobs:
             });
 
       - name: Notify Slack with auto-mapped mentions
+        id: slack-notify
         if: |
           steps.pr-info.outputs.skip == 'false' &&
           steps.pr-info.outputs.is_draft == 'false'
@@ -238,6 +239,24 @@ jobs:
 
             core.info(`Slack message posted: ts=${postData.ts}`);
 
+            // --- Resolve channel name from ID ---
+            let channelName = channelId;
+            try {
+              const infoRes = await fetch(
+                `https://slack.com/api/conversations.info?channel=${encodeURIComponent(channelId)}`,
+                { headers: { Authorization: `Bearer ${slackToken}` } }
+              );
+              const infoData = await infoRes.json();
+              if (infoData.ok) {
+                channelName = infoData.channel.name;
+              } else {
+                core.warning(`conversations.info failed: ${infoData.error}`);
+              }
+            } catch (e) {
+              core.warning(`Failed to resolve channel name: ${e.message}`);
+            }
+            core.setOutput('channel_name', channelName);
+
             // --- Post threaded reply to auto-subscribe PR author ---
             if (authorSlackId) {
               const threadRes = await fetch('https://slack.com/api/chat.postMessage', {
@@ -274,5 +293,5 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body: `<!-- pr-ready-notified -->\n:white_check_mark: Slack notification sent to *#platform-pr-notify*.`,
+              body: `<!-- pr-ready-notified -->\n:white_check_mark: Slack notification sent to *#${{ steps.slack-notify.outputs.channel_name }}*.`,
             });

@@ -22,6 +22,7 @@ GitHub-hosted runners (required for `ubuntu-latest`) aren't available on private
 
 1. Go to [api.slack.com/apps](https://api.slack.com/apps) → **Create New App** → **From scratch**
 2. Under **OAuth & Permissions**, add these **Bot Token Scopes**:
+   - `channels:read`
    - `users:read`
    - `users:read.email`
    - `chat:write`
