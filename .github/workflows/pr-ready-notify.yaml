@@ -63,6 +63,7 @@ jobs:
             core.setOutput('is_draft', pr.draft ? 'true' : 'false');
             core.setOutput('pr_url', pr.html_url);
             core.setOutput('pr_title', pr.title);
+            core.setOutput('pr_author', pr.user.login);
 
             // Extract additional info: strip the @pr-ready line and trim blank lines
             const body = context.payload.comment.body;
@@ -89,30 +90,126 @@ jobs:
               body: `> [!WARNING]\n> Make sure PR is not in Draft before requesting a review.`,
             });
 
-      - name: Build Slack message
-        id: build-message
+      - name: Notify Slack with auto-mapped mentions
+        id: slack-notify
         if: |
           steps.pr-info.outputs.skip == 'false' &&
           steps.pr-info.outputs.is_draft == 'false'
         uses: actions/github-script@v7
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          GITHUB_SLACK_OVERRIDES: ${{ secrets.GITHUB_SLACK_OVERRIDES }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
+            const slackToken = process.env.SLACK_BOT_TOKEN;
+            const channelId = process.env.SLACK_CHANNEL_ID;
+
+            // Parse optional manual overrides (JSON map: {"github-user": "USLACKID"})
+            let overrides = {};
+            try {
+              const raw = process.env.GITHUB_SLACK_OVERRIDES;
+              if (raw) overrides = JSON.parse(raw);
+            } catch (e) {
+              core.warning(`Failed to parse GITHUB_SLACK_OVERRIDES: ${e.message}`);
+            }
+
+            // --- Helper: resolve a GitHub username to a Slack user ID ---
+            async function resolveToSlackId(githubUsername) {
+              // Check manual overrides first
+              if (overrides[githubUsername]) {
+                core.info(`Using override for ${githubUsername}: ${overrides[githubUsername]}`);
+                return overrides[githubUsername];
+              }
+
+              // Step 1: Get email from GitHub profile
+              let email = null;
+              try {
+                const { data: ghUser } = await github.rest.users.getByUsername({
+                  username: githubUsername,
+                });
+                if (ghUser.email) email = ghUser.email;
+              } catch (e) {
+                core.warning(`Failed to fetch GitHub user ${githubUsername}: ${e.message}`);
+              }
+
+              // Step 2: Fallback — extract email from PR commits
+              if (!email) {
+                try {
+                  const { data: commits } = await github.rest.pulls.listCommits({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    pull_number: context.issue.number,
+                  });
+                  const match = commits.find(
+                    (c) => c.author && c.author.login === githubUsername
+                  );
+                  if (match && match.commit.author && match.commit.author.email) {
+                    email = match.commit.author.email;
+                  }
+                } catch (e) {
+                  core.warning(`Failed to fetch PR commits: ${e.message}`);
+                }
+              }
+
+              // Skip noreply emails — they won't match Slack
+              if (!email || email.endsWith('@users.noreply.github.com')) {
+                core.info(`No usable email found for ${githubUsername}`);
+                return null;
+              }
+
+              // Step 3: Look up Slack user by email
+              try {
+                const res = await fetch(
+                  `https://slack.com/api/users.lookupByEmail?email=${encodeURIComponent(email)}`,
+                  { headers: { Authorization: `Bearer ${slackToken}` } }
+                );
+                const data = await res.json();
+                if (data.ok) {
+                  core.info(`Resolved ${githubUsername} (${email}) → Slack ${data.user.id}`);
+                  return data.user.id;
+                }
+                core.info(`Slack lookup failed for ${email}: ${data.error}`);
+              } catch (e) {
+                core.warning(`Slack API error for ${email}: ${e.message}`);
+              }
+
+              return null;
+            }
+
+            // --- Resolve PR author and commenter in parallel ---
+            const prAuthor = '${{ steps.pr-info.outputs.pr_author }}';
+            const commenter = context.payload.comment.user.login;
+
+            let authorSlackId, commenterSlackId;
+            if (prAuthor === commenter) {
+              authorSlackId = await resolveToSlackId(prAuthor);
+              commenterSlackId = authorSlackId;
+            } else {
+              [authorSlackId, commenterSlackId] = await Promise.all([
+                resolveToSlackId(prAuthor),
+                resolveToSlackId(commenter),
+              ]);
+            }
+
+            // --- Build message ---
             const prUrl = '${{ steps.pr-info.outputs.pr_url }}';
             const prTitle = `${{ steps.pr-info.outputs.pr_title }}`;
             const additionalInfo = `${{ steps.pr-info.outputs.additional_info }}`;
 
-            let text = `PR is ready for review: ${prUrl}`;
-            if (additionalInfo) {
-              text += `\n\n${additionalInfo}`;
-            }
+            const authorMention = authorSlackId ? `<@${authorSlackId}>` : `@${prAuthor}`;
+            const commenterMention = commenterSlackId ? `<@${commenterSlackId}>` : `@${commenter}`;
+
+            let text = `PR by ${authorMention} is ready for review: ${prUrl} (requested by ${commenterMention})`;
+            if (additionalInfo) text += `\n\n${additionalInfo}`;
 
             const blocks = [
               {
                 type: 'section',
                 text: {
                   type: 'mrkdwn',
-                  text: `*PR is ready for review:* <${prUrl}|${prTitle}>`,
+                  text: `*PR by ${authorMention} is ready for review:* <${prUrl}|${prTitle}>\n_Requested by ${commenterMention}_`,
                 },
               },
             ];
@@ -120,25 +217,69 @@ jobs:
             if (additionalInfo) {
               blocks.push({
                 type: 'section',
-                text: {
-                  type: 'mrkdwn',
-                  text: additionalInfo,
-                },
+                text: { type: 'mrkdwn', text: additionalInfo },
               });
             }
 
-            const payload = JSON.stringify({ text, blocks });
-            core.setOutput('payload', payload);
+            // --- Post to Slack via chat.postMessage ---
+            const postRes = await fetch('https://slack.com/api/chat.postMessage', {
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${slackToken}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({ channel: channelId, text, blocks }),
+            });
+            const postData = await postRes.json();
 
-      - name: Send Slack notification
-        if: |
-          steps.pr-info.outputs.skip == 'false' &&
-          steps.pr-info.outputs.is_draft == 'false'
-        uses: slackapi/slack-github-action@v2
-        with:
-          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
-          webhook-type: incoming-webhook
-          payload: ${{ steps.build-message.outputs.payload }}
+            if (!postData.ok) {
+              core.setFailed(`Slack chat.postMessage failed: ${postData.error}`);
+              return;
+            }
+
+            core.info(`Slack message posted: ts=${postData.ts}`);
+
+            // --- Resolve channel name from ID ---
+            let channelName = channelId;
+            try {
+              const infoRes = await fetch(
+                `https://slack.com/api/conversations.info?channel=${encodeURIComponent(channelId)}`,
+                { headers: { Authorization: `Bearer ${slackToken}` } }
+              );
+              const infoData = await infoRes.json();
+              if (infoData.ok) {
+                channelName = infoData.channel.name;
+              } else {
+                core.warning(`conversations.info failed: ${infoData.error}`);
+              }
+            } catch (e) {
+              core.warning(`Failed to resolve channel name: ${e.message}`);
+            }
+            core.setOutput('channel_name', channelName);
+
+            // --- Post threaded reply to auto-subscribe PR author ---
+            if (authorSlackId) {
+              const threadRes = await fetch('https://slack.com/api/chat.postMessage', {
+                method: 'POST',
+                headers: {
+                  Authorization: `Bearer ${slackToken}`,
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                  channel: channelId,
+                  thread_ts: postData.ts,
+                  text: `<@${authorSlackId}> — you'll be notified of replies to this thread.`,
+                }),
+              });
+              const threadData = await threadRes.json();
+              if (!threadData.ok) {
+                core.warning(`Threaded reply failed: ${threadData.error}`);
+              } else {
+                core.info('Threaded reply posted — author auto-subscribed.');
+              }
+            } else {
+              core.info('Skipping threaded reply — author Slack ID not resolved.');
+            }
 
       - name: Mark PR as notified
         if: |
@@ -152,5 +293,5 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body: `<!-- pr-ready-notified -->\n:white_check_mark: Slack notification sent to *#platform-pr-notify*.`,
+              body: `<!-- pr-ready-notified -->\n:white_check_mark: Slack notification sent to *#${{ steps.slack-notify.outputs.channel_name }}*.`,
             });
