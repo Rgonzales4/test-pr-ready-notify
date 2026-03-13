@@ -1,0 +1,156 @@
+name: PR Ready Notify
+
+# Note: issue_comment is the only GitHub event that fires for PR comments.
+# There is no PR-only comment event. The job-level `if` below ensures this
+# workflow is completely skipped for plain issue comments.
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  notify-slack:
+    if: >-
+      github.event.issue.pull_request != null &&
+      contains(github.event.comment.body, '@pr-ready')
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: Verify this is a pull request
+        run: |
+          if [ -z "${{ github.event.issue.pull_request.url }}" ]; then
+            echo "::notice::Not a pull request comment — skipping."
+            exit 1
+          fi
+
+      - name: Check if already notified and get PR info
+        id: pr-info
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            // Check for existing bot notification marker
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const alreadyNotified = comments.some(
+              (c) =>
+                c.user.type === 'Bot' &&
+                c.body.includes('<!-- pr-ready-notified -->')
+            );
+
+            if (alreadyNotified) {
+              core.setOutput('skip', 'true');
+              return;
+            }
+
+            // Fetch PR details
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+            });
+
+            core.setOutput('skip', 'false');
+            core.setOutput('is_draft', pr.draft ? 'true' : 'false');
+            core.setOutput('pr_url', pr.html_url);
+            core.setOutput('pr_title', pr.title);
+
+            // Extract additional info: strip the @pr-ready line and trim blank lines
+            const body = context.payload.comment.body;
+            const additionalInfo = body
+              .split('\n')
+              .filter((line) => !line.trim().startsWith('@pr-ready'))
+              .join('\n')
+              .trim();
+
+            core.setOutput('additional_info', additionalInfo);
+
+      - name: Comment on draft PR
+        if: |
+          steps.pr-info.outputs.skip == 'false' &&
+          steps.pr-info.outputs.is_draft == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `> [!WARNING]\n> Make sure PR is not in Draft before requesting a review.`,
+            });
+
+      - name: Build Slack message
+        id: build-message
+        if: |
+          steps.pr-info.outputs.skip == 'false' &&
+          steps.pr-info.outputs.is_draft == 'false'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const prUrl = '${{ steps.pr-info.outputs.pr_url }}';
+            const prTitle = `${{ steps.pr-info.outputs.pr_title }}`;
+            const additionalInfo = `${{ steps.pr-info.outputs.additional_info }}`;
+
+            let text = `PR is ready for review: ${prUrl}`;
+            if (additionalInfo) {
+              text += `\n\n${additionalInfo}`;
+            }
+
+            const blocks = [
+              {
+                type: 'section',
+                text: {
+                  type: 'mrkdwn',
+                  text: `*PR is ready for review:* <${prUrl}|${prTitle}>`,
+                },
+              },
+            ];
+
+            if (additionalInfo) {
+              blocks.push({
+                type: 'section',
+                text: {
+                  type: 'mrkdwn',
+                  text: additionalInfo,
+                },
+              });
+            }
+
+            const payload = JSON.stringify({ text, blocks });
+            core.setOutput('payload', payload);
+
+      - name: Send Slack notification
+        if: |
+          steps.pr-info.outputs.skip == 'false' &&
+          steps.pr-info.outputs.is_draft == 'false'
+        uses: slackapi/slack-github-action@v2
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: ${{ steps.build-message.outputs.payload }}
+
+      - name: Mark PR as notified
+        if: |
+          steps.pr-info.outputs.skip == 'false' &&
+          steps.pr-info.outputs.is_draft == 'false'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `<!-- pr-ready-notified -->\n:white_check_mark: Slack notification sent to *#platform-pr-notify*.`,
+            });
