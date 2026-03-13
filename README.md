@@ -117,3 +117,5 @@ The workflow uses the default `GITHUB_TOKEN` with these permissions:
 8. Comment `@pr-ready` again on the PR
 9. Confirm a thread reply appeared in the **same** Slack thread mentioning the :eyes: reactors
 10. Reply in the Slack thread — verify the PR author gets a notification
+
+Hello World!
