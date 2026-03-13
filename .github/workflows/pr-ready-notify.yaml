@@ -335,16 +335,35 @@ jobs:
                 core.warning(`Failed to fetch reactions: ${e.message}`);
               }
 
-              let threadText = 'PR is ready for re-review';
+              // Build thread text
+              let threadBlocks = [];
+
+              // Main text
+              let mainText = 'PR is ready for re-review';
               if (!isSameUser) {
                 const mention = await resolveToSlackMention(commenterLogin) || `@${commenterLogin}`;
-                threadText += ` (requested by ${mention})`;
+                mainText += ` (requested by ${mention})`;
               }
-              if (eyesMentions) threadText += `\ncc ${eyesMentions}`;
-              if (additionalInfo) threadText += `\n${additionalInfo}`;
+              if (eyesMentions) mainText += `\ncc ${eyesMentions}`;
+
+              threadBlocks.push({
+                type: 'section',
+                text: { type: 'mrkdwn', text: mainText },
+              });
+
+              // Additional info block, separated by horizontal line if present
+              if (additionalInfo) {
+                threadBlocks.push({
+                  type: 'divider',
+                });
+                threadBlocks.push({
+                  type: 'section',
+                  text: { type: 'mrkdwn', text: additionalInfo },
+                });
+              }
 
               const threadData = await slackApi('chat.postMessage', {
-                body: { channel: channelId, thread_ts: existingSlackTs, text: threadText },
+                body: { channel: channelId, thread_ts: existingSlackTs, blocks: threadBlocks },
               });
               if (!threadData.ok) {
                 core.setFailed(`Thread reply failed: ${threadData.error}`);
