@@ -1,16 +1,23 @@
 name: PR Ready Notify
 
-# issue_comment is the only GitHub event that fires for PR comments.
-# The job-level `if` ensures this is skipped for plain issue comments.
 on:
   issue_comment:
     types: [created]
+  pull_request:
+    types: [opened, ready_for_review, converted_to_draft, closed]
+  pull_request_review:
+    types: [submitted]
 
 jobs:
   notify-slack:
+    # issue_comment: only PR comments containing @pr-ready
+    # pull_request / pull_request_review: always run
     if: >-
-      github.event.issue.pull_request != null &&
-      contains(github.event.comment.body, '@pr-ready')
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request != null &&
+       contains(github.event.comment.body, '@pr-ready')) ||
+      github.event_name == 'pull_request' ||
+      github.event_name == 'pull_request_review'
 
     runs-on: ubuntu-latest
 
@@ -20,94 +27,21 @@ jobs:
       issues: write
 
     steps:
-      - name: Get PR info and check state
-        id: pr-info
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const issue_number = context.issue.number;
-
-            const { data: pr } = await github.rest.pulls.get({
-              ...context.repo, pull_number: issue_number,
-            });
-
-            if (pr.merged) { core.setOutput('status', 'merged'); return; }
-            if (pr.state === 'closed') { core.setOutput('status', 'closed'); return; }
-            if (pr.draft) { core.setOutput('status', 'draft'); return; }
-
-            // Check if all reviews are approved with no pending reviewers
-            const reviews = await github.paginate(github.rest.pulls.listReviews, {
-              ...context.repo, pull_number: issue_number, per_page: 100,
-            });
-            const latestByReviewer = new Map();
-            for (const r of reviews) {
-              if (r.state !== 'COMMENTED') latestByReviewer.set(r.user.login, r.state);
-            }
-            const allApproved = latestByReviewer.size > 0
-              && [...latestByReviewer.values()].every(s => s === 'APPROVED');
-            const noPending = pr.requested_reviewers.length === 0
-              && (pr.requested_teams?.length ?? 0) === 0;
-            if (allApproved && noPending) {
-              core.setOutput('status', 'approved');
-              return;
-            }
-
-            core.setOutput('status', 'ready');
-            core.setOutput('pr_url', pr.html_url);
-            core.setOutput('pr_title', pr.title);
-            core.setOutput('pr_author', pr.user.login);
-
-            // Strip @pr-ready line(s) case-insensitively
-            const additionalInfo = context.payload.comment.body
-              .split('\n')
-              .filter(l => !l.trim().toLowerCase().startsWith('@pr-ready'))
-              .join('\n')
-              .trim();
-            core.setOutput('additional_info', additionalInfo);
-
-      - name: Comment on skipped PR
-        if: >-
-          steps.pr-info.outputs.status == 'merged' ||
-          steps.pr-info.outputs.status == 'closed' ||
-          steps.pr-info.outputs.status == 'draft' ||
-          steps.pr-info.outputs.status == 'approved'
-        uses: actions/github-script@v7
-        env:
-          PR_STATUS: ${{ steps.pr-info.outputs.status }}
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const messages = {
-              merged: '> [!WARNING]\n> This PR has already been merged. No further review is needed.',
-              closed: '> [!WARNING]\n> This PR is currently closed. PR review has not been requested.',
-              draft: '> [!WARNING]\n> This PR is currently marked as *Draft*.\n⚠️ Next steps: Convert the PR to ready-for-review status before requesting reviews.',
-              approved: '> [!NOTE]\n> This PR already has all required approvals and no pending reviewers.\n> No further review is required unless changes are requested.'
-            };
-            await github.rest.issues.createComment({
-              ...context.repo,
-              issue_number: context.issue.number,
-              body: messages[process.env.PR_STATUS],
-            });
-
-      - name: Notify Slack
+      - name: PR lifecycle Slack notification
         id: slack-notify
-        if: steps.pr-info.outputs.status == 'ready'
         uses: actions/github-script@v7
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
-          PR_URL: ${{ steps.pr-info.outputs.pr_url }}
-          PR_TITLE: ${{ steps.pr-info.outputs.pr_title }}
-          PR_AUTHOR: ${{ steps.pr-info.outputs.pr_author }}
-          ADDITIONAL_INFO: ${{ steps.pr-info.outputs.additional_info }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const slackToken = process.env.SLACK_BOT_TOKEN;
             const channelId = process.env.SLACK_CHANNEL_ID;
 
-            // --- Slack API helper ---
+            // ==========================================================
+            // Slack API helper
+            // ==========================================================
             async function slackApi(method, options = {}) {
               const { params, body } = options;
               const url = new URL(`https://slack.com/api/${method}`);
@@ -129,7 +63,107 @@ jobs:
               return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
             }
 
-            // --- Fetch channel name and pinned mappings in parallel ---
+            // ==========================================================
+            // Determine event type and PR info
+            // ==========================================================
+            const eventName = context.eventName;
+            let pr, action;
+
+            if (eventName === 'issue_comment') {
+              const { data } = await github.rest.pulls.get({
+                ...context.repo, pull_number: context.issue.number,
+              });
+              pr = data;
+              action = 'pr-ready-comment';
+            } else if (eventName === 'pull_request') {
+              pr = context.payload.pull_request;
+              const ghAction = context.payload.action;
+              if (ghAction === 'opened' && !pr.draft) {
+                action = 'opened';
+              } else if (ghAction === 'ready_for_review') {
+                action = 'ready-for-review';
+              } else if (ghAction === 'converted_to_draft') {
+                action = 'converted-to-draft';
+              } else if (ghAction === 'closed' && pr.merged) {
+                action = 'merged';
+              } else if (ghAction === 'closed') {
+                action = 'closed';
+              } else {
+                core.info(`Skipping PR event: action=${ghAction}, draft=${pr.draft}`);
+                return;
+              }
+            } else if (eventName === 'pull_request_review') {
+              pr = context.payload.pull_request;
+              const review = context.payload.review;
+              if (review.state === 'approved') {
+                action = 'review-approved';
+              } else if (review.state === 'changes_requested') {
+                action = 'review-changes-requested';
+              } else if (review.state === 'commented') {
+                action = 'review-commented';
+              } else {
+                core.info(`Skipping review event: state=${review.state}`);
+                return;
+              }
+            }
+
+            const prNumber = pr.number;
+            const prUrl = pr.html_url;
+            const prTitle = pr.title;
+            const prAuthorLogin = pr.user.login;
+
+            core.info(`Event: ${action}, PR #${prNumber}: ${prTitle}`);
+
+            // ==========================================================
+            // For @pr-ready comments: validate PR state and extract info
+            // ==========================================================
+            if (action === 'pr-ready-comment') {
+              if (pr.merged) {
+                await github.rest.issues.createComment({
+                  ...context.repo, issue_number: prNumber,
+                  body: '> [!WARNING]\n> This PR has already been merged. No further review is needed.',
+                });
+                return;
+              }
+              if (pr.state === 'closed') {
+                await github.rest.issues.createComment({
+                  ...context.repo, issue_number: prNumber,
+                  body: '> [!WARNING]\n> This PR is currently closed. PR review has not been requested.',
+                });
+                return;
+              }
+              if (pr.draft) {
+                await github.rest.issues.createComment({
+                  ...context.repo, issue_number: prNumber,
+                  body: '> [!WARNING]\n> This PR is currently marked as *Draft*.\n⚠️ Next steps: Convert the PR to ready-for-review status before requesting reviews.',
+                });
+                return;
+              }
+
+              // Check if already fully approved
+              const reviews = await github.paginate(github.rest.pulls.listReviews, {
+                ...context.repo, pull_number: prNumber, per_page: 100,
+              });
+              const latestByReviewer = new Map();
+              for (const r of reviews) {
+                if (r.state !== 'COMMENTED') latestByReviewer.set(r.user.login, r.state);
+              }
+              const allApproved = latestByReviewer.size > 0
+                && [...latestByReviewer.values()].every(s => s === 'APPROVED');
+              const noPending = pr.requested_reviewers.length === 0
+                && (pr.requested_teams?.length ?? 0) === 0;
+              if (allApproved && noPending) {
+                await github.rest.issues.createComment({
+                  ...context.repo, issue_number: prNumber,
+                  body: '> [!NOTE]\n> This PR already has all required approvals and no pending reviewers.\n> No further review is required unless changes are requested.',
+                });
+                return;
+              }
+            }
+
+            // ==========================================================
+            // Fetch channel info and pinned user mappings
+            // ==========================================================
             const [channelResult, pinsResult] = await Promise.allSettled([
               slackApi('conversations.info', { params: { channel: channelId } }),
               slackApi('pins.list', { params: { channel: channelId } }),
@@ -139,9 +173,8 @@ jobs:
             if (channelResult.status === 'fulfilled' && channelResult.value.ok) {
               channelName = channelResult.value.channel?.name || channelId;
             }
-            core.setOutput('channel_name', channelName);
 
-            // --- Parse pinned message mapping ---
+            // Parse pinned message mapping (github-slack-user-map)
             const keyToSlackEmail = {};
             if (pinsResult.status === 'fulfilled' && pinsResult.value.ok) {
               const mappingMsg = pinsResult.value.items?.find(
@@ -169,7 +202,9 @@ jobs:
               }
             }
 
-            // --- User resolution helpers ---
+            // ==========================================================
+            // User resolution helpers
+            // ==========================================================
             const emailCache = new Map();
 
             async function slackMentionByEmail(email) {
@@ -199,13 +234,12 @@ jobs:
               return null;
             }
 
-            // Lazily fetched and cached
             let _prCommits = null;
             async function getPrCommits() {
               if (_prCommits !== null) return _prCommits;
               try {
                 const { data } = await github.rest.pulls.listCommits({
-                  ...context.repo, pull_number: context.issue.number,
+                  ...context.repo, pull_number: prNumber,
                 });
                 _prCommits = data;
               } catch (e) {
@@ -246,24 +280,16 @@ jobs:
               return null;
             }
 
-            // --- Shared state ---
-            const prAuthorLogin = process.env.PR_AUTHOR;
-            const commenterLogin = context.payload.comment.user.login;
-            const isSameUser = prAuthorLogin.toLowerCase() === commenterLogin.toLowerCase();
-            const prUrl = process.env.PR_URL;
-            const prTitle = process.env.PR_TITLE;
-            const additionalInfo = process.env.ADDITIONAL_INFO;
-
             // ==========================================================
-            // Search Slack channel for an existing message about this PR
+            // Search Slack channel for existing message about this PR
             // ==========================================================
             let existingSlackTs = '';
-            let existingReactions = null;
+            let existingBlocks = null;
+            let existingText = '';
 
             try {
               let cursor;
               let found = false;
-              // Search up to 5 pages (500 messages) of channel history
               for (let page = 0; page < 5 && !found; page++) {
                 const params = { channel: channelId, limit: '100' };
                 if (cursor) params.cursor = cursor;
@@ -275,10 +301,8 @@ jobs:
                 for (const msg of (history.messages || [])) {
                   let foundInText = false;
 
-                  // 1. Check fallback text
                   if (msg.text && msg.text.includes(prUrl)) foundInText = true;
 
-                  // 2. Check blocks recursively
                   function blocksContainUrl(blocks) {
                     if (!blocks) return false;
                     for (const b of blocks) {
@@ -286,7 +310,6 @@ jobs:
                         for (const key of Object.keys(b)) {
                           const val = b[key];
                           if (typeof val === 'string') {
-                            // Normalize Slack link: "<URL|text>" → "URL"
                             const normalized = val.replace(/<([^>|]+)(\|[^>]+)?>/g, '$1');
                             if (normalized.includes(prUrl)) return true;
                           }
@@ -302,9 +325,10 @@ jobs:
 
                   if (foundInText) {
                     existingSlackTs = msg.ts;
-                    existingReactions = msg.reactions || [];
+                    existingBlocks = msg.blocks || [];
+                    existingText = msg.text || '';
                     found = true;
-                    core.info(`Found existing Slack message for this PR: ts=${msg.ts}`);
+                    core.info(`Found existing Slack message for PR: ts=${msg.ts}`);
                     break;
                   }
                 }
@@ -316,121 +340,268 @@ jobs:
             }
 
             // ==========================================================
-            // EXISTING THREAD: reply instead of creating a new message
+            // Reaction management helper
             // ==========================================================
-            if (existingSlackTs) {
-              // Fetch reactions from the existing Slack message
-              let eyesMentions = '';
-              try {
-                const reactionsData = await slackApi('reactions.get', {
-                  params: { channel: channelId, timestamp: existingSlackTs },
-                });
-                if (reactionsData.ok) {
-                  const eyesReaction = reactionsData.message?.reactions?.find(r => r.name === 'eyes');
-                  if (eyesReaction) {
-                    eyesMentions = eyesReaction.users.map(id => `<@${id}>`).join(', ');
-                  }
+            async function setReactions(ts, { add = [], remove = [] } = {}) {
+              for (const name of remove) {
+                try {
+                  await slackApi('reactions.remove', {
+                    body: { channel: channelId, timestamp: ts, name },
+                  });
+                } catch (e) {
+                  // Ignore — reaction may not exist
                 }
-              } catch (e) {
-                core.warning(`Failed to fetch reactions: ${e.message}`);
               }
-
-              // Build thread text
-              let threadBlocks = [];
-
-              // Main text
-              let mainText = 'PR is ready for re-review';
-              if (!isSameUser) {
-                const mention = await resolveToSlackMention(commenterLogin) || `@${commenterLogin}`;
-                mainText += ` (requested by ${mention})`;
+              for (const name of add) {
+                try {
+                  await slackApi('reactions.add', {
+                    body: { channel: channelId, timestamp: ts, name },
+                  });
+                } catch (e) {
+                  // Ignore — may already be reacted
+                }
               }
-              if (eyesMentions) mainText += `\ncc ${eyesMentions}`;
+            }
 
-              threadBlocks.push({
-                type: 'section',
-                text: { type: 'mrkdwn', text: mainText },
-              });
+            // Status reactions for parent message (eyes is added by reviewers, not the bot)
+            // No emoji       = Waiting for reviews
+            // :eyes:         = Reviewing (added manually by reviewers on Slack)
+            // :speech_balloon: = Review submitted (comment only)
+            // :repeat:       = Changes requested
+            // :white_check_mark: = Approved and merged (done)
+            // :no_entry:     = Closed
+            const STATUS_CONFIG = {
+              'ready':                    { label: '',                     reactions: { add: [],                    remove: ['repeat', 'speech_balloon'] } },
+              'converted-to-draft':       { label: ' [Draft]',            reactions: { add: [],                    remove: [] } },
+              'review-commented':         { label: '',                     reactions: { add: ['speech_balloon'],    remove: [] } },
+              'review-changes-requested': { label: ' [Changes Requested]',reactions: { add: ['repeat'],            remove: ['speech_balloon'] } },
+              'merged':                   { label: ' [Merged]',           reactions: { add: ['white_check_mark'],  remove: ['repeat', 'speech_balloon', 'no_entry'] } },
+              'closed':                   { label: ' [Closed]',            reactions: { add: ['no_entry'],          remove: ['repeat', 'speech_balloon'] } },
+            };
 
-              // Additional info block, separated by horizontal line if present
-              if (additionalInfo) {
-                threadBlocks.push({
-                  type: 'divider',
+            // ==========================================================
+            // Update parent message status (text label + reactions)
+            // ==========================================================
+            async function updateParentMessage(ts, statusKey, authorMention) {
+              const config = STATUS_CONFIG[statusKey];
+              if (!config) return;
+
+              // Update message text with status label
+              const statusText = config.label
+                ? `*PR by ${authorMention}${config.label}:* ${prUrl}`
+                : `*PR by ${authorMention} is ready for review:* ${prUrl}`;
+              const blocks = [
+                {
+                  type: 'section',
+                  text: { type: 'mrkdwn', text: statusText },
+                },
+              ];
+
+              try {
+                const result = await slackApi('chat.update', {
+                  body: { channel: channelId, ts, text: statusText, blocks },
                 });
-                threadBlocks.push({
+                if (!result.ok) core.warning(`chat.update failed: ${result.error}`);
+              } catch (e) {
+                core.warning(`Failed to update parent message: ${e.message}`);
+              }
+
+              await setReactions(ts, config.reactions);
+            }
+
+            // ==========================================================
+            // Post a thread reply
+            // ==========================================================
+            async function postThreadReply(ts, text) {
+              const result = await slackApi('chat.postMessage', {
+                body: {
+                  channel: channelId,
+                  thread_ts: ts,
+                  text,
+                  blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }],
+                },
+              });
+              if (!result.ok) {
+                core.warning(`Thread reply failed: ${result.error}`);
+                return null;
+              }
+              core.info(`Thread reply posted: ts=${result.ts}`);
+              return result.ts;
+            }
+
+            // ==========================================================
+            // Create new parent message
+            // ==========================================================
+            async function createParentMessage(authorMention, additionalInfo) {
+              const statusText = `*PR by ${authorMention} is ready for review:* ${prUrl}`;
+              const text = `PR by ${authorMention} is ready for review: ${prUrl}`;
+              const blocks = [
+                {
+                  type: 'section',
+                  text: { type: 'mrkdwn', text: statusText },
+                },
+              ];
+              if (additionalInfo) {
+                blocks.push({
                   type: 'section',
                   text: { type: 'mrkdwn', text: additionalInfo },
                 });
               }
 
-              const threadData = await slackApi('chat.postMessage', {
-                body: { channel: channelId, thread_ts: existingSlackTs, blocks: threadBlocks },
+              const postData = await slackApi('chat.postMessage', {
+                body: { channel: channelId, text, blocks },
               });
-              if (!threadData.ok) {
-                core.setFailed(`Thread reply failed: ${threadData.error}`);
+              if (!postData.ok) {
+                core.setFailed(`chat.postMessage failed: ${postData.error}`);
+                return null;
+              }
+              core.info(`New Slack message posted: ts=${postData.ts}`);
+
+              return postData.ts;
+            }
+
+            // ==========================================================
+            // Main logic per event type
+            // ==========================================================
+            const authorMention = await resolveToSlackMention(prAuthorLogin) || `@${prAuthorLogin}`;
+
+            // --- @pr-ready comment (thread-only: re-review notification) ---
+            if (action === 'pr-ready-comment') {
+              if (!existingSlackTs) {
+                await github.rest.issues.createComment({
+                  ...context.repo, issue_number: prNumber,
+                  body: '> [!NOTE]\n> No Slack thread exists for this PR yet. A thread is created automatically when the PR is opened (non-draft) or marked ready for review.',
+                });
                 return;
               }
-              core.info(`Re-review thread reply posted: ts=${threadData.ts}`);
+
+              const commenterLogin = context.payload.comment.user.login;
+              const isSameUser = prAuthorLogin.toLowerCase() === commenterLogin.toLowerCase();
+
+              const additionalInfo = context.payload.comment.body
+                .split('\n')
+                .filter(l => !l.trim().toLowerCase().startsWith('@pr-ready'))
+                .join('\n')
+                .trim();
+
+              // Collect PR reviewers from GitHub (requested + those who submitted reviews)
+              const reviewerLogins = new Set();
+              for (const r of (pr.requested_reviewers || [])) {
+                if (r.login.toLowerCase() !== prAuthorLogin.toLowerCase()) {
+                  reviewerLogins.add(r.login);
+                }
+              }
+              try {
+                const reviews = await github.paginate(github.rest.pulls.listReviews, {
+                  ...context.repo, pull_number: prNumber, per_page: 100,
+                });
+                for (const r of reviews) {
+                  if (r.user.login.toLowerCase() !== prAuthorLogin.toLowerCase()) {
+                    reviewerLogins.add(r.user.login);
+                  }
+                }
+              } catch (e) {
+                core.warning(`Failed to fetch PR reviews: ${e.message}`);
+              }
+
+              // Resolve reviewer GitHub logins to Slack mentions
+              const reviewerMentions = [];
+              for (const login of reviewerLogins) {
+                const mention = await resolveToSlackMention(login) || `@${login}`;
+                reviewerMentions.push(mention);
+              }
+
+              let mainText = ':bell: PR is ready for re-review';
+              if (!isSameUser) {
+                const commenterMention = await resolveToSlackMention(commenterLogin) || `@${commenterLogin}`;
+                mainText += ` (requested by ${commenterMention})`;
+              }
+              if (reviewerMentions.length > 0) mainText += `\ncc ${reviewerMentions.join(', ')}`;
+              if (additionalInfo) mainText += `\n\n${additionalInfo}`;
+
+              await postThreadReply(existingSlackTs, mainText);
+              await updateParentMessage(existingSlackTs, 'ready', authorMention);
               core.setOutput('is_new', 'false');
               return;
             }
 
-            // ==========================================================
-            // NEW MESSAGE: first notification for this PR
-            // ==========================================================
-            const authorMention = await resolveToSlackMention(prAuthorLogin) || `@${prAuthorLogin}`;
-            const commenterMention = isSameUser
-              ? authorMention
-              : (await resolveToSlackMention(commenterLogin) || `@${commenterLogin}`);
+            // --- PR opened (non-draft) or marked ready for review ---
+            if (action === 'opened' || action === 'ready-for-review') {
+              if (existingSlackTs) {
+                const verb = action === 'opened' ? 'opened and is' : 'is now';
+                await postThreadReply(existingSlackTs, `PR ${verb} ready for review`);
+                await updateParentMessage(existingSlackTs, 'ready', authorMention);
+              } else {
+                const ts = await createParentMessage(authorMention);
+                if (!ts) return;
 
-            const escapedTitle = escapeSlackText(prTitle);
-            const requestedBy = isSameUser ? '' : `\n_Requested by ${commenterMention}_`;
-            const text = isSameUser
-              ? `PR by ${authorMention} is ready for review: ${prUrl}`
-              : `PR by ${authorMention} is ready for review: ${prUrl} (requested by ${commenterMention})`;
-            const blocks = [
-              {
-                type: 'section',
-                text: {
-                  type: 'mrkdwn',
-                  text: `*PR by ${authorMention} is ready for review:* ${prUrl}`,
-                },
-              },
-            ];
-            if (additionalInfo) {
-              blocks.push({
-                type: 'section',
-                text: { type: 'mrkdwn', text: additionalInfo },
-              });
-            }
+                // Subscribe author to thread
+                if (authorMention.startsWith('<@')) {
+                  try {
+                    await slackApi('chat.postMessage', {
+                      body: {
+                        channel: channelId,
+                        thread_ts: ts,
+                        text: `${authorMention} — you'll be notified of replies to this thread.`,
+                      },
+                    });
+                  } catch (e) {
+                    core.warning(`Author subscription reply failed: ${e.message}`);
+                  }
+                }
 
-            const postData = await slackApi('chat.postMessage', {
-              body: { channel: channelId, text, blocks },
-            });
-            if (!postData.ok) {
-              core.setFailed(`chat.postMessage failed: ${postData.error}`);
+                core.setOutput('is_new', 'true');
+                core.setOutput('slack_ts', ts);
+                core.setOutput('channel_name', channelName);
+              }
               return;
             }
-            core.info(`Slack message posted: ts=${postData.ts}`);
-            core.setOutput('slack_ts', postData.ts);
-            core.setOutput('is_new', 'true');
 
-            // Subscribe author to thread
-            if (authorMention.startsWith('<@')) {
-              try {
-                const td = await slackApi('chat.postMessage', {
-                  body: {
-                    channel: channelId,
-                    thread_ts: postData.ts,
-                    text: `${authorMention} — you'll be notified of replies to this thread.`,
-                  },
-                });
-                if (!td.ok) core.warning(`Author subscription reply failed: ${td.error}`);
-              } catch (e) {
-                core.warning(`Author subscription reply failed: ${e.message}`);
-              }
+            // --- Converted to draft ---
+            if (action === 'converted-to-draft') {
+              if (!existingSlackTs) { core.info('No existing Slack thread — skipping draft notification'); return; }
+              await postThreadReply(existingSlackTs, ':pencil2: PR has been converted back to draft');
+              await updateParentMessage(existingSlackTs, 'converted-to-draft', authorMention);
+              return;
             }
 
-      - name: Mark PR with Slack message reference
+            // --- Review submitted ---
+            if (action === 'review-approved' || action === 'review-changes-requested' || action === 'review-commented') {
+              if (!existingSlackTs) { core.info('No existing Slack thread — skipping review notification'); return; }
+
+              const reviewerLogin = context.payload.review.user.login;
+              const reviewerMention = await resolveToSlackMention(reviewerLogin) || `@${reviewerLogin}`;
+
+              if (action === 'review-approved') {
+                await postThreadReply(existingSlackTs, `:white_check_mark: ${reviewerMention} reviewed this PR — *approved*`);
+                // white_check_mark reaction is only added on merge (approved + merged = done)
+              } else if (action === 'review-changes-requested') {
+                await postThreadReply(existingSlackTs, `:repeat: ${reviewerMention} reviewed this PR — *requested changes*`);
+                await updateParentMessage(existingSlackTs, 'review-changes-requested', authorMention);
+              } else {
+                await postThreadReply(existingSlackTs, `:speech_balloon: ${reviewerMention} reviewed this PR — *commented*`);
+                await setReactions(existingSlackTs, STATUS_CONFIG['review-commented'].reactions);
+              }
+              return;
+            }
+
+            // --- Merged ---
+            if (action === 'merged') {
+              if (!existingSlackTs) { core.info('No existing Slack thread — skipping merge notification'); return; }
+              await postThreadReply(existingSlackTs, ':tada: PR has been merged');
+              await updateParentMessage(existingSlackTs, 'merged', authorMention);
+              return;
+            }
+
+            // --- Closed (not merged) ---
+            if (action === 'closed') {
+              if (!existingSlackTs) { core.info('No existing Slack thread — skipping close notification'); return; }
+              await postThreadReply(existingSlackTs, ':no_entry: PR has been closed');
+              await updateParentMessage(existingSlackTs, 'closed', authorMention);
+              return;
+            }
+
+      - name: Comment on PR with Slack reference
         if: steps.slack-notify.outputs.is_new == 'true'
         uses: actions/github-script@v7
         env:
@@ -441,8 +612,9 @@ jobs:
           script: |
             const channelName = process.env.CHANNEL_NAME;
             const slackTs = process.env.SLACK_TS;
+            const prNumber = context.issue?.number || context.payload.pull_request?.number;
             await github.rest.issues.createComment({
               ...context.repo,
-              issue_number: context.issue.number,
+              issue_number: prNumber,
               body: `<!-- slack-notify-ts:${slackTs} -->\n:white_check_mark: Slack notification sent to *#${channelName}*.`,
             });
