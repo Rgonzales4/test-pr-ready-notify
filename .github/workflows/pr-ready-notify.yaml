@@ -80,6 +80,7 @@ jobs:
 
       - name: Summarize with Claude
         id: summarize
+        continue-on-error: true
         if: steps.extract.outputs.text != '' && steps.extract.outputs.length >= 500
         uses: anthropics/claude-code-action@v1
         with:
@@ -89,6 +90,10 @@ jobs:
 
             ${{ steps.extract.outputs.text }}
 
+      - name: Log Claude failure
+        if: steps.summarize.outcome == 'failure'
+        run: echo "Claude summarization failed — falling back to raw text"
+
       # ── Step 3: Main Slack notification ───────────────────────
       - name: PR lifecycle Slack notification
         id: slack-notify
@@ -96,13 +101,18 @@ jobs:
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
-          LLM_SUMMARY: ${{ steps.summarize.outputs.result || steps.extract.outputs.text }}
+          RAW_TEXT: ${{ steps.extract.outputs.text || '' }}
+          CLAUDE_SUCCESS: ${{ steps.summarize.outcome == 'success' }}
+          CLAUDE_RESULT: ${{ steps.summarize.outputs.result || '' }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const slackToken = process.env.SLACK_BOT_TOKEN;
             const channelId = process.env.SLACK_CHANNEL_ID;
             const llmSummary = (process.env.LLM_SUMMARY || '').trim();
+            if (!llmSummary) {
+              core.info('Claude summary missing or empty — using raw text');
+            }
 
             // ── Slack API helper ─────────────────────────────────────
             // Wraps fetch with auth header, scope diagnostics on first
@@ -430,7 +440,32 @@ jobs:
             // ── Helper: append summary to message text ───────────────
             // Uses pre-computed summaryText (LLM summary or short raw text)
             function appendSummary(text) {
-              if (llmSummary) return `${text}\n\n───\n${llmSummary}`;
+              const rawText = process.env.RAW_TEXT || '';
+              const claudeSuccess = process.env.CLAUDE_SUCCESS === 'true';
+              const claudeResult = (process.env.CLAUDE_RESULT || '').trim();
+
+              let finalSummary = '';
+
+              if (claudeSuccess) {
+                // Summarization succeeded
+                finalSummary = claudeResult.length > 0
+                  ? claudeResult
+                  : rawText;
+              } else {
+                // Summarization failed
+                finalSummary = rawText;
+              }
+
+              // Decide whether to append
+              if (finalSummary.length > 0 && finalSummary.length < 500) {
+                // Always append if < 500 chars
+                return `${text}\n\n───\n${finalSummary}`;
+              } else if (claudeSuccess && finalSummary.length >= 500) {
+                // Only append if summarization succeeded and summary >= 500
+                return `${text}\n\n───\n${finalSummary}`;
+              }
+
+              // Otherwise, do not append
               return text;
             }
 
