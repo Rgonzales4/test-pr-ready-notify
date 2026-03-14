@@ -33,20 +33,74 @@ jobs:
       contents: read
       pull-requests: write
       issues: write
+      id-token: write
 
     steps:
+      # ── Step 1: Extract text that may need summarization ──────
+      # Lightweight step that pulls out review body or @pr-ready
+      # additional text so it can be summarized before posting.
+      - name: Extract text to summarize
+        id: extract
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const eventName = context.eventName;
+
+            if (eventName === 'pull_request_review') {
+              // Skip bot reviews
+              if (context.payload.review.user.type === 'Bot') return;
+              const body = (context.payload.review.body || '').trim();
+              if (body) {
+                core.setOutput('text', body);
+                core.info(`Extracted review body (${body.length} chars)`);
+              }
+            } else if (eventName === 'issue_comment') {
+              const commentBody = context.payload.comment.body || '';
+              if (!commentBody.toLowerCase().includes('@pr-ready')) return;
+              // Extract everything that isn't the @pr-ready line itself
+              const additional = commentBody
+                .split('\n')
+                .filter(l => !l.trim().toLowerCase().startsWith('@pr-ready'))
+                .join('\n').trim();
+              if (additional) {
+                core.setOutput('text', additional);
+                core.info(`Extracted @pr-ready additional text (${additional.length} chars)`);
+              }
+            }
+
+      # ── Step 2: Summarize with Claude (if there's text) ───────
+      - name: Checkout for Claude Code Action
+        if: steps.extract.outputs.text != ''
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Summarize with Claude
+        id: summarize
+        if: steps.extract.outputs.text != ''
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            Summarize the following PR review comment in 1-2 concise sentences for a Slack notification. Keep it short and to the point. Do not use markdown formatting. If the text is already short enough (one sentence), just return it as-is. Return ONLY the summary text, nothing else.
+
+            ${{ steps.extract.outputs.text }}
+
+      # ── Step 3: Main Slack notification ───────────────────────
       - name: PR lifecycle Slack notification
         id: slack-notify
         uses: actions/github-script@v7
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          LLM_SUMMARY: ${{ steps.summarize.outputs.result }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const slackToken = process.env.SLACK_BOT_TOKEN;
             const channelId = process.env.SLACK_CHANNEL_ID;
+            const llmSummary = (process.env.LLM_SUMMARY || '').trim();
 
             // ── Slack API helper ─────────────────────────────────────
             // Wraps fetch with auth header, scope diagnostics on first
@@ -89,43 +143,6 @@ jobs:
               }
 
               return res.json();
-            }
-
-            // ── LLM summarization helper ──────────────────────────────
-            // Calls Claude to produce a concise summary of review/comment
-            // text. Returns null if no API key, empty text, or on failure.
-            const anthropicKey = process.env.CLAUDE_CODE_OAUTH_TOKEN;
-
-            async function summarizeText(text) {
-              if (!anthropicKey || !text || !text.trim()) return null;
-              try {
-                const res = await fetch('https://api.anthropic.com/v1/messages', {
-                  method: 'POST',
-                  headers: {
-                    'Authorization': `Bearer ${anthropicKey}`,
-                    'anthropic-version': '2023-06-01',
-                    'Content-Type': 'application/json',
-                  },
-                  body: JSON.stringify({
-                    model: 'claude-haiku-4-5-20251001',
-                    max_tokens: 256,
-                    messages: [{
-                      role: 'user',
-                      content: `Summarize the following PR review comment in 1-2 concise sentences for a Slack notification. Keep it short and to the point. Do not use markdown formatting. If the text is already short enough (one sentence), just return it as-is.\n\n${text}`,
-                    }],
-                  }),
-                });
-                if (!res.ok) {
-                  core.warning(`Claude API returned ${res.status}`);
-                  return null;
-                }
-                const data = await res.json();
-                const summary = data.content?.[0]?.text?.trim();
-                return summary || null;
-              } catch (e) {
-                core.warning(`Claude summarization failed: ${e.message}`);
-                return null;
-              }
             }
 
             // ── Determine event type & PR info ───────────────────────
@@ -400,6 +417,12 @@ jobs:
               'closed':                   { emoji: ':no_entry:',         label: 'Closed' },
             };
 
+            // ── Helper: append summary divider to message text ───────
+            function appendSummary(text) {
+              if (llmSummary) return `${text}\n\n───\n${llmSummary}`;
+              return text;
+            }
+
             // ── Build parent message text ─────────────────────────────
             // Format:
             //   PR #1234 – Title
@@ -528,10 +551,6 @@ jobs:
 
               const commenterLogin = context.payload.comment.user.login;
               const isSameUser = prAuthorLogin.toLowerCase() === commenterLogin.toLowerCase();
-              const additionalInfo = context.payload.comment.body
-                .split('\n')
-                .filter(l => !l.trim().toLowerCase().startsWith('@pr-ready'))
-                .join('\n').trim();
 
               const reviewerMentions = await getReviewerMentions();
 
@@ -542,11 +561,8 @@ jobs:
               }
               if (reviewerMentions.length) text += `\ncc ${reviewerMentions.join(', ')}`;
 
-              // Summarize any additional text the user included with @pr-ready
-              if (additionalInfo) {
-                const summary = await summarizeText(additionalInfo);
-                text += `\n\n───\n${summary || additionalInfo}`;
-              }
+              // Append LLM summary of any additional text from the @pr-ready comment
+              text = appendSummary(text);
 
               await postThreadReply(existingSlackTs, text);
               await updateParentMessage(existingSlackTs, 'ready', authorMention, reviewerMentions);
@@ -595,14 +611,9 @@ jobs:
                 'review-changes-requested': `:repeat: ${mention} reviewed this PR — *requested changes*`,
                 'review-commented':         `:speech_balloon: ${mention} reviewed this PR — *commented*`,
               };
-              let text = msgs[action];
 
-              // Summarize the review body if present
-              const reviewBody = (context.payload.review.body || '').trim();
-              if (reviewBody) {
-                const summary = await summarizeText(reviewBody);
-                text += `\n\n───\n${summary || reviewBody}`;
-              }
+              // Append LLM summary of the review body if present
+              const text = appendSummary(msgs[action]);
 
               await postThreadReply(existingSlackTs, text);
               // Re-fetch reviewers so the parent message stays up to date
