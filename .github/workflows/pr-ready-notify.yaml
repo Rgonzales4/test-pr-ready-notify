@@ -109,10 +109,6 @@ jobs:
           script: |
             const slackToken = process.env.SLACK_BOT_TOKEN;
             const channelId = process.env.SLACK_CHANNEL_ID;
-            const llmSummary = (process.env.LLM_SUMMARY || '').trim();
-            if (!llmSummary) {
-              core.info('Claude summary missing or empty — using raw text');
-            }
 
             // ── Slack API helper ─────────────────────────────────────
             // Wraps fetch with auth header, scope diagnostics on first
@@ -457,11 +453,8 @@ jobs:
               }
 
               // Decide whether to append
-              if (finalSummary.length > 0 && finalSummary.length < 500) {
+              if (finalSummary.length < 500) {
                 // Always append if < 500 chars
-                return `${text}\n\n───\n${finalSummary}`;
-              } else if (claudeSuccess && finalSummary.length >= 500) {
-                // Only append if summarization succeeded and summary >= 500
                 return `${text}\n\n───\n${finalSummary}`;
               }
 
