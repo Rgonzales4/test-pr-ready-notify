@@ -612,7 +612,7 @@ jobs:
                 const verb = action === 'reopened' ? 'has been reopened and is'
                            : action === 'opened' ? 'opened and is'
                            : 'is now';
-                await postThreadReply(existingSlackTs, `PR ${verb} ready for review`);
+                await postThreadReply(existingSlackTs, `:bell: PR ${verb} ready for review`);
                 // Update parent to clear any previous status and refresh reviewer list
                 await updateParentMessage(existingSlackTs, 'ready', authorMention, reviewerMentions);
               } else {
