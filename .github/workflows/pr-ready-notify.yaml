@@ -325,6 +325,23 @@ jobs:
             // Reaction management helper
             // ==========================================================
             async function setReactions(ts, { add = [], remove = [] } = {}) {
+              // Add the new reaction FIRST to ensure it's visible even if removes fail
+              for (const name of add) {
+                try {
+                  core.info(`reactions.add: attempting :${name}: on ts=${ts}`);
+                  const result = await slackApi('reactions.add', {
+                    body: { channel: channelId, timestamp: ts, name },
+                  });
+                  if (!result.ok && result.error !== 'already_reacted') {
+                    core.warning(`reactions.add(${name}) failed: ${JSON.stringify(result)}`);
+                  } else {
+                    core.info(`Reaction :${name}: ${result.ok ? 'added' : 'already present'}`);
+                  }
+                } catch (e) {
+                  core.warning(`reactions.add(${name}) threw: ${e.message}`);
+                }
+              }
+              // Then remove old status reactions
               for (const name of remove) {
                 try {
                   const result = await slackApi('reactions.remove', {
@@ -335,20 +352,6 @@ jobs:
                   }
                 } catch (e) {
                   // Ignore — reaction may not exist
-                }
-              }
-              for (const name of add) {
-                try {
-                  const result = await slackApi('reactions.add', {
-                    body: { channel: channelId, timestamp: ts, name },
-                  });
-                  if (!result.ok && result.error !== 'already_reacted') {
-                    core.warning(`reactions.add(${name}) failed: ${result.error}`);
-                  } else {
-                    core.info(`Reaction :${name}: ${result.ok ? 'added' : 'already present'}`);
-                  }
-                } catch (e) {
-                  core.warning(`reactions.add(${name}) threw: ${e.message}`);
                 }
               }
             }
