@@ -117,13 +117,16 @@ GitHub-hosted runners (required for `ubuntu-latest`) aren't available on private
 
 > **Note:** After adding new scopes, you must click **Reinstall to Workspace** for the changes to take effect.
 
-### 2. Add Repository Secrets
+### 2. Add Repository Secrets and Variables
 
 | Secret | Required | Description |
 |--------|----------|-------------|
 | `SLACK_BOT_TOKEN` | Yes | The `xoxb-...` Bot User OAuth Token from step 1 |
-| `NOTIFY_PR_SLACK_CHANNEL_ID` | Yes | Channel ID (right-click channel → View channel details → copy ID at bottom) |
 | `CLAUDE_CODE_OAUTH_TOKEN` | No | Claude Code OAuth token for LLM-powered comment/review summarization via `anthropics/claude-code-action`. Uses your existing Claude subscription — no separate API key needed. If omitted, summaries are skipped. |
+
+| Variables | Required | Description |
+|--------|----------|-------------|
+| `NOTIFY_PR_SLACK_CHANNEL_ID` | Yes | Channel ID (right-click channel → View channel details → copy ID at bottom) |
 
 ### 3. Pin the user mapping message
 
