@@ -453,7 +453,7 @@ jobs:
               }
 
               // Decide whether to append
-              if (finalSummary.length < 500) {
+              if (finalSummary.length > 0 && finalSummary.length < 500) {
                 // Always append if < 500 chars
                 return `${text}\n\n───\n${finalSummary}`;
               }
