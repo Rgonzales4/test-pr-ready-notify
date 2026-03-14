@@ -1,4 +1,4 @@
-name: PR Ready Notify
+name: PR Slack Notifier
 
 # Tracks PR lifecycle events and maintains one Slack message per PR.
 # Thread replies notify the team of status changes; the parent message
@@ -33,20 +33,86 @@ jobs:
       contents: read
       pull-requests: write
       issues: write
+      id-token: write
 
     steps:
+      # ── Step 1: Extract text that may need summarization ──────
+      # Lightweight step that pulls out review body or @pr-ready
+      # additional text so it can be summarized before posting.
+      - name: Extract text to summarize
+        id: extract
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const eventName = context.eventName;
+
+            if (eventName === 'pull_request_review') {
+              // Skip bot reviews
+              if (context.payload.review.user.type === 'Bot') return;
+              const body = (context.payload.review.body || '').trim();
+              if (body) {
+                core.setOutput('text', body);
+                core.setOutput('length', body.length.toString());
+                core.info(`Extracted review body (${body.length} chars)`);
+              }
+            } else if (eventName === 'issue_comment') {
+              const commentBody = context.payload.comment.body || '';
+              if (!commentBody.toLowerCase().includes('@pr-ready')) return;
+              // Extract everything that isn't the @pr-ready line itself
+              const additional = commentBody
+                .split('\n')
+                .filter(l => !l.trim().toLowerCase().startsWith('@pr-ready'))
+                .join('\n').trim();
+              if (additional) {
+                core.setOutput('text', additional);
+                core.setOutput('length', additional.length.toString());
+                core.info(`Extracted @pr-ready additional text (${additional.length} chars)`);
+              }
+            }
+
+      # ── Step 2: Summarize with Claude (if there's text) ───────
+      - name: Checkout for Claude Code Action
+        if: steps.extract.outputs.text != '' && steps.extract.outputs.length >= 500
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Summarize with Claude
+        id: summarize
+        continue-on-error: true
+        if: steps.extract.outputs.text != '' && steps.extract.outputs.length >= 500
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            Summarize the following PR review comment in 1-2 concise sentences for a Slack notification. Keep it short and to the point. Do not use markdown formatting. If the text is already short enough (one sentence), just return it as-is. Return ONLY the summary text, nothing else.
+
+            ${{ steps.extract.outputs.text }}
+
+      - name: Log Claude failure
+        if: steps.summarize.outcome == 'failure'
+        run: echo "Claude summarization failed — falling back to raw text"
+
+      # ── Step 3: Main Slack notification ───────────────────────
       - name: PR lifecycle Slack notification
         id: slack-notify
         uses: actions/github-script@v7
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          RAW_TEXT: ${{ steps.extract.outputs.text || '' }}
+          CLAUDE_SUCCESS: ${{ steps.summarize.outcome == 'success' }}
+          CLAUDE_RESULT: ${{ steps.summarize.outputs.result || '' }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const slackToken = process.env.SLACK_BOT_TOKEN;
             const channelId = process.env.SLACK_CHANNEL_ID;
+            const llmSummary = (process.env.LLM_SUMMARY || '').trim();
+            if (!llmSummary) {
+              core.info('Claude summary missing or empty — using raw text');
+            }
 
             // ── Slack API helper ─────────────────────────────────────
             // Wraps fetch with auth header, scope diagnostics on first
@@ -89,43 +155,6 @@ jobs:
               }
 
               return res.json();
-            }
-
-            // ── LLM summarization helper ──────────────────────────────
-            // Calls Claude to produce a concise summary of review/comment
-            // text. Returns null if no API key, empty text, or on failure.
-            const anthropicKey = process.env.CLAUDE_CODE_OAUTH_TOKEN;
-
-            async function summarizeText(text) {
-              if (!anthropicKey || !text || !text.trim()) return null;
-              try {
-                const res = await fetch('https://api.anthropic.com/v1/messages', {
-                  method: 'POST',
-                  headers: {
-                    'Authorization': `Bearer ${anthropicKey}`,
-                    'anthropic-version': '2023-06-01',
-                    'Content-Type': 'application/json',
-                  },
-                  body: JSON.stringify({
-                    model: 'claude-haiku-4-5-20251001',
-                    max_tokens: 256,
-                    messages: [{
-                      role: 'user',
-                      content: `Summarize the following PR review comment in 1-2 concise sentences for a Slack notification. Keep it short and to the point. Do not use markdown formatting. If the text is already short enough (one sentence), just return it as-is.\n\n${text}`,
-                    }],
-                  }),
-                });
-                if (!res.ok) {
-                  core.warning(`Claude API returned ${res.status}`);
-                  return null;
-                }
-                const data = await res.json();
-                const summary = data.content?.[0]?.text?.trim();
-                return summary || null;
-              } catch (e) {
-                core.warning(`Claude summarization failed: ${e.message}`);
-                return null;
-              }
             }
 
             // ── Determine event type & PR info ───────────────────────
@@ -329,62 +358,70 @@ jobs:
             }
 
             // ── Find existing Slack message for this PR ──────────────
-            // Searches up to 500 messages (5 pages) of channel history.
+            // Fast path: check PR comments for cached ts from a previous
+            // notification (<!-- slack-notify-ts:... -->). Falls back to
+            // channel history search (up to 500 messages) if not found.
             let existingSlackTs = '';
 
             try {
-              let cursor, found = false;
-              for (let page = 0; page < 5 && !found; page++) {
-                const params = { channel: channelId, limit: '100' };
-                if (cursor) params.cursor = cursor;
-                const history = await slackApi('conversations.history', { params });
-                if (!history.ok) break;
-
-                for (const msg of (history.messages || [])) {
-                  const inText = msg.text?.includes(prUrl);
-                  const inBlocks = (function check(nodes) {
-                    if (!nodes) return false;
-                    for (const n of nodes) {
-                      if (typeof n !== 'object') continue;
-                      for (const v of Object.values(n)) {
-                        if (typeof v === 'string') {
-                          if (v.replace(/<([^>|]+)(\|[^>]+)?>/g, '$1').includes(prUrl)) return true;
-                        }
-                        if (Array.isArray(v) && check(v)) return true;
-                        if (typeof v === 'object' && v !== null && check([v])) return true;
-                      }
-                    }
-                    return false;
-                  })(msg.blocks);
-
-                  if (inText || inBlocks) {
-                    existingSlackTs = msg.ts;
-                    found = true;
-                    core.info(`Found existing Slack message: ts=${msg.ts}`);
-                    break;
-                  }
+              const { data: comments } = await github.rest.issues.listComments({
+                ...context.repo, issue_number: prNumber, per_page: 100,
+              });
+              for (const c of comments) {
+                const m = c.body?.match(/<!-- slack-notify-ts:(\S+) -->/);
+                if (m) {
+                  existingSlackTs = m[1];
+                  core.info(`Found cached Slack ts from PR comment: ${existingSlackTs}`);
+                  break;
                 }
-                cursor = history.response_metadata?.next_cursor;
-                if (!cursor) break;
               }
             } catch (e) {
-              core.warning(`Channel history search failed: ${e.message}`);
+              core.warning(`PR comment cache lookup failed: ${e.message}`);
+            }
+
+            // Slow path: search channel history if no cached ts found
+            if (!existingSlackTs) {
+              try {
+                let cursor, found = false;
+                for (let page = 0; page < 5 && !found; page++) {
+                  const params = { channel: channelId, limit: '100' };
+                  if (cursor) params.cursor = cursor;
+                  const history = await slackApi('conversations.history', { params });
+                  if (!history.ok) break;
+
+                  for (const msg of (history.messages || [])) {
+                    const inText = msg.text?.includes(prUrl);
+                    const inBlocks = (function check(nodes) {
+                      if (!nodes) return false;
+                      for (const n of nodes) {
+                        if (typeof n !== 'object') continue;
+                        for (const v of Object.values(n)) {
+                          if (typeof v === 'string') {
+                            if (v.replace(/<([^>|]+)(\|[^>]+)?>/g, '$1').includes(prUrl)) return true;
+                          }
+                          if (Array.isArray(v) && check(v)) return true;
+                          if (typeof v === 'object' && v !== null && check([v])) return true;
+                        }
+                      }
+                      return false;
+                    })(msg.blocks);
+
+                    if (inText || inBlocks) {
+                      existingSlackTs = msg.ts;
+                      found = true;
+                      core.info(`Found existing Slack message via history: ts=${msg.ts}`);
+                      break;
+                    }
+                  }
+                  cursor = history.response_metadata?.next_cursor;
+                  if (!cursor) break;
+                }
+              } catch (e) {
+                core.warning(`Channel history search failed: ${e.message}`);
+              }
             }
 
             // ── Status configuration ─────────────────────────────────
-            // Each status maps to an emoji prefix (shown in message text)
-            // and a reaction name (added to the parent message).
-            // Only one status reaction is present at a time.
-            //
-            // Status lifecycle:
-            //   (no emoji)         → Waiting for reviews (initial)
-            //   :bell:             → Ready for re-review (@pr-ready)
-            //   :pencil2:          → Converted to draft
-            //   :white_check_mark: → Approved
-            //   :repeat:           → Changes requested
-            //   :speech_balloon:   → Commented
-            //   :tada:             → Merged
-            //   :no_entry:         → Closed
             const ALL_STATUS_REACTIONS = [
               'bell', 'white_check_mark', 'repeat',
               'speech_balloon', 'pencil2', 'tada', 'no_entry',
@@ -400,12 +437,39 @@ jobs:
               'closed':                   { emoji: ':no_entry:',         label: 'Closed' },
             };
 
+            // ── Helper: append summary to message text ───────────────
+            // Uses pre-computed summaryText (LLM summary or short raw text)
+            function appendSummary(text) {
+              const rawText = process.env.RAW_TEXT || '';
+              const claudeSuccess = process.env.CLAUDE_SUCCESS === 'true';
+              const claudeResult = (process.env.CLAUDE_RESULT || '').trim();
+
+              let finalSummary = '';
+
+              if (claudeSuccess) {
+                // Summarization succeeded
+                finalSummary = claudeResult.length > 0
+                  ? claudeResult
+                  : rawText;
+              } else {
+                // Summarization failed
+                finalSummary = rawText;
+              }
+
+              // Decide whether to append
+              if (finalSummary.length > 0 && finalSummary.length < 500) {
+                // Always append if < 500 chars
+                return `${text}\n\n───\n${finalSummary}`;
+              } else if (claudeSuccess && finalSummary.length >= 500) {
+                // Only append if summarization succeeded and summary >= 500
+                return `${text}\n\n───\n${finalSummary}`;
+              }
+
+              // Otherwise, do not append
+              return text;
+            }
+
             // ── Build parent message text ─────────────────────────────
-            // Format:
-            //   PR #1234 – Title
-            //   Author: @mention
-            //   Link: <url>
-            //   Assigned reviewers: @bob @carol   (only if reviewers exist)
             function buildParentText(statusKey, authorMention, reviewerMentions) {
               const cfg = statusKey ? STATUS[statusKey] : null;
               const prefix = cfg ? `${cfg.emoji} ` : '';
@@ -428,7 +492,6 @@ jobs:
               const reaction = cfg.emoji.replace(/:/g, '');
               const text = buildParentText(statusKey, authorMention, reviewerMentions);
 
-              // 1. Update message text with new status and info
               try {
                 const r = await slackApi('chat.update', {
                   body: {
@@ -442,7 +505,6 @@ jobs:
                 core.warning(`chat.update threw: ${e.message}`);
               }
 
-              // 2. Add the current status reaction
               try {
                 const r = await slackApi('reactions.add', {
                   body: { channel: channelId, timestamp: ts, name: reaction },
@@ -452,16 +514,16 @@ jobs:
                 core.warning(`reactions.add(${reaction}) threw: ${e.message}`);
               }
 
-              // 3. Remove all other bot-managed status reactions
-              for (const name of ALL_STATUS_REACTIONS) {
-                if (name === reaction) continue;
-                try {
-                  const r = await slackApi('reactions.remove', {
+              const removals = ALL_STATUS_REACTIONS
+                .filter(name => name !== reaction)
+                .map(name =>
+                  slackApi('reactions.remove', {
                     body: { channel: channelId, timestamp: ts, name },
-                  });
-                  if (!r.ok && r.error !== 'no_reaction') core.warning(`reactions.remove(${name}): ${r.error}`);
-                } catch (_) { /* not present — ignore */ }
-              }
+                  }).then(r => {
+                    if (!r.ok && r.error !== 'no_reaction') core.warning(`reactions.remove(${name}): ${r.error}`);
+                  }).catch(() => { /* not present — ignore */ })
+                );
+              await Promise.allSettled(removals);
             }
 
             // ── Post a thread reply ──────────────────────────────────
@@ -478,7 +540,6 @@ jobs:
             }
 
             // ── Create initial parent message ────────────────────────
-            // No status emoji — "no emoji" = waiting for reviews.
             async function createParentMessage(authorMention, reviewerMentions) {
               const text = buildParentText(null, authorMention, reviewerMentions);
               const r = await slackApi('chat.postMessage', {
@@ -515,9 +576,7 @@ jobs:
             const authorMention = await resolveToSlackMention(prAuthorLogin) || `@${prAuthorLogin}`;
 
             // ── @pr-ready comment ────────────────────────────────────
-            // Posts a re-review notice and mentions all PR reviewers.
             if (action === 'pr-ready-comment') {
-              // If no Slack thread exists yet, create the parent message first
               if (!existingSlackTs) {
                 const reviewerMentions = await getReviewerMentions();
                 const ts = await createParentMessage(authorMention, reviewerMentions);
@@ -528,10 +587,6 @@ jobs:
 
               const commenterLogin = context.payload.comment.user.login;
               const isSameUser = prAuthorLogin.toLowerCase() === commenterLogin.toLowerCase();
-              const additionalInfo = context.payload.comment.body
-                .split('\n')
-                .filter(l => !l.trim().toLowerCase().startsWith('@pr-ready'))
-                .join('\n').trim();
 
               const reviewerMentions = await getReviewerMentions();
 
@@ -542,11 +597,7 @@ jobs:
               }
               if (reviewerMentions.length) text += `\ncc ${reviewerMentions.join(', ')}`;
 
-              // Summarize any additional text the user included with @pr-ready
-              if (additionalInfo) {
-                const summary = await summarizeText(additionalInfo);
-                text += `\n\n───\n${summary || additionalInfo}`;
-              }
+              text = appendSummary(text);
 
               await postThreadReply(existingSlackTs, text);
               await updateParentMessage(existingSlackTs, 'ready', authorMention, reviewerMentions);
@@ -555,7 +606,6 @@ jobs:
 
             // ── PR opened, reopened, or marked ready for review ───────
             if (action === 'opened' || action === 'reopened' || action === 'ready-for-review') {
-              // Resolve reviewers for the parent message (may be empty initially)
               const reviewerMentions = await getReviewerMentions();
 
               if (existingSlackTs) {
@@ -563,7 +613,6 @@ jobs:
                            : action === 'opened' ? 'opened and is'
                            : 'is now';
                 await postThreadReply(existingSlackTs, `PR ${verb} ready for review`);
-                // Update parent to clear any previous status and refresh reviewer list
                 await updateParentMessage(existingSlackTs, 'ready', authorMention, reviewerMentions);
               } else {
                 const ts = await createParentMessage(authorMention, reviewerMentions);
@@ -595,18 +644,10 @@ jobs:
                 'review-changes-requested': `:repeat: ${mention} reviewed this PR — *requested changes*`,
                 'review-commented':         `:speech_balloon: ${mention} reviewed this PR — *commented*`,
               };
-              let text = msgs[action];
 
-              // Summarize the review body if present
-              const reviewBody = (context.payload.review.body || '').trim();
-              if (reviewBody) {
-                const summary = await summarizeText(reviewBody);
-                text += `\n\n───\n${summary || reviewBody}`;
-              }
+              const text = appendSummary(msgs[action]);
 
               await postThreadReply(existingSlackTs, text);
-              // Re-fetch reviewers so the parent message stays up to date
-              // (a new reviewer may have just submitted their first review)
               const reviewerMentions = await getReviewerMentions();
               await updateParentMessage(existingSlackTs, action, authorMention, reviewerMentions);
               return;
