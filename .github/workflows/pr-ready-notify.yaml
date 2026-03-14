@@ -112,6 +112,13 @@ jobs:
               else { core.info(`Skipping: action=${ghAction}, draft=${pr.draft}`); return; }
             } else if (eventName === 'pull_request_review') {
               pr = context.payload.pull_request;
+
+              // Skip reviews submitted by bots (e.g. automated checks)
+              if (context.payload.review.user.type === 'Bot') {
+                core.info(`Skipping bot review by ${context.payload.review.user.login}`);
+                return;
+              }
+
               const state = context.payload.review.state.toLowerCase();
 
               // Filter out empty review-comment events (inline comments without
@@ -472,12 +479,13 @@ jobs:
             // ── @pr-ready comment ────────────────────────────────────
             // Posts a re-review notice and mentions all PR reviewers.
             if (action === 'pr-ready-comment') {
+              // If no Slack thread exists yet, create the parent message first
               if (!existingSlackTs) {
-                await github.rest.issues.createComment({
-                  ...context.repo, issue_number: prNumber,
-                  body: '> [!NOTE]\n> No Slack thread exists for this PR yet. A thread is created automatically when the PR is opened (non-draft) or marked ready for review.',
-                });
-                return;
+                const reviewerMentions = await getReviewerMentions();
+                const ts = await createParentMessage(authorMention, reviewerMentions);
+                if (!ts) return;
+                existingSlackTs = ts;
+                await subscribeAuthor(ts, authorMention);
               }
 
               const commenterLogin = context.payload.comment.user.login;

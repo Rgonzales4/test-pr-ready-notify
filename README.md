@@ -62,9 +62,12 @@ For `@pr-ready` comments, the bot posts a PR comment and does **not** notify Sla
 | PR is merged | Warning: already merged |
 | PR is closed | Warning: PR is closed |
 | PR is in draft | Warning: convert to ready-for-review first |
-| No Slack thread exists | Note: thread is created when PR is opened |
+
+If no Slack thread exists when `@pr-ready` is commented, one is created automatically.
 
 Draft PRs do **not** trigger a Slack notification when opened. The first message is only sent when the PR is opened as non-draft or transitions from draft to ready.
+
+Bot-authored reviews (e.g. automated checks) are silently skipped.
 
 Inline-only review comments (no formal review body) are filtered out to reduce thread noise.
 
