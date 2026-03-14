@@ -343,20 +343,19 @@ jobs:
               }
             }
 
-            // Status reactions for parent message (eyes is added by reviewers, not the bot)
-            // No emoji       = Waiting for reviews
-            // :eyes:         = Reviewing (added manually by reviewers on Slack)
-            // :speech_balloon: = Review submitted (comment only)
-            // :repeat:       = Changes requested
-            // :white_check_mark: = Approved and merged (done)
-            // :no_entry:     = Closed
+            // Bot-managed status reactions on parent message — mutually exclusive.
+            // Only one status reaction at a time; all others are removed before adding the new one.
+            // Users may add their own reactions (e.g. :eyes:) which are left untouched.
+            const ALL_STATUS_REACTIONS = ['bell', 'white_check_mark', 'repeat', 'speech_balloon', 'pencil2', 'tada', 'no_entry'];
+
             const STATUS_CONFIG = {
-              'ready':                    { label: '',                     reactions: { add: [],                    remove: ['repeat', 'speech_balloon'] } },
-              'converted-to-draft':       { label: ' [Draft]',            reactions: { add: [],                    remove: [] } },
-              'review-commented':         { label: '',                     reactions: { add: ['speech_balloon'],    remove: [] } },
-              'review-changes-requested': { label: ' [Changes Requested]',reactions: { add: ['repeat'],            remove: ['speech_balloon'] } },
-              'merged':                   { label: ' [Merged]',           reactions: { add: ['white_check_mark'],  remove: ['repeat', 'speech_balloon', 'no_entry'] } },
-              'closed':                   { label: ' [Closed]',            reactions: { add: ['no_entry'],          remove: ['repeat', 'speech_balloon'] } },
+              'ready':                    { label: '',                      reaction: 'bell' },
+              'converted-to-draft':       { label: ' [Draft]',             reaction: 'pencil2' },
+              'review-approved':          { label: '',                      reaction: 'white_check_mark' },
+              'review-commented':         { label: '',                      reaction: 'speech_balloon' },
+              'review-changes-requested': { label: ' [Changes Requested]', reaction: 'repeat' },
+              'merged':                   { label: ' [Merged]',            reaction: 'tada' },
+              'closed':                   { label: ' [Closed]',            reaction: 'no_entry' },
             };
 
             // ==========================================================
@@ -386,7 +385,9 @@ jobs:
                 core.warning(`Failed to update parent message: ${e.message}`);
               }
 
-              await setReactions(ts, config.reactions);
+              // Status reactions are mutually exclusive — remove all others, add current
+              const toRemove = ALL_STATUS_REACTIONS.filter(r => r !== config.reaction);
+              await setReactions(ts, { remove: toRemove, add: [config.reaction] });
             }
 
             // ==========================================================
@@ -554,13 +555,13 @@ jobs:
 
               if (action === 'review-approved') {
                 await postThreadReply(existingSlackTs, `:white_check_mark: ${reviewerMention} reviewed this PR — *approved*`);
-                // white_check_mark reaction is only added on merge (approved + merged = done)
+                await updateParentMessage(existingSlackTs, 'review-approved', authorMention);
               } else if (action === 'review-changes-requested') {
                 await postThreadReply(existingSlackTs, `:repeat: ${reviewerMention} reviewed this PR — *requested changes*`);
                 await updateParentMessage(existingSlackTs, 'review-changes-requested', authorMention);
               } else {
                 await postThreadReply(existingSlackTs, `:speech_balloon: ${reviewerMention} reviewed this PR — *commented*`);
-                await setReactions(existingSlackTs, STATUS_CONFIG['review-commented'].reactions);
+                await updateParentMessage(existingSlackTs, 'review-commented', authorMention);
               }
               return;
             }
