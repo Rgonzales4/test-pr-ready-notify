@@ -33,6 +33,7 @@ jobs:
       contents: read
       pull-requests: write
       issues: write
+      id-token: write
 
     steps:
       - name: PR lifecycle Slack notification
@@ -41,7 +42,6 @@ jobs:
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
@@ -89,43 +89,6 @@ jobs:
               }
 
               return res.json();
-            }
-
-            // ── LLM summarization helper ──────────────────────────────
-            // Calls Claude to produce a concise summary of review/comment
-            // text. Returns null if no API key, empty text, or on failure.
-            const anthropicKey = process.env.CLAUDE_CODE_OAUTH_TOKEN;
-
-            async function summarizeText(text) {
-              if (!anthropicKey || !text || !text.trim()) return null;
-              try {
-                const res = await fetch('https://api.anthropic.com/v1/messages', {
-                  method: 'POST',
-                  headers: {
-                    'Authorization': `Bearer ${anthropicKey}`,
-                    'anthropic-version': '2023-06-01',
-                    'Content-Type': 'application/json',
-                  },
-                  body: JSON.stringify({
-                    model: 'claude-haiku-4-5-20251001',
-                    max_tokens: 256,
-                    messages: [{
-                      role: 'user',
-                      content: `Summarize the following PR review comment in 1-2 concise sentences for a Slack notification. Keep it short and to the point. Do not use markdown formatting. If the text is already short enough (one sentence), just return it as-is.\n\n${text}`,
-                    }],
-                  }),
-                });
-                if (!res.ok) {
-                  core.warning(`Claude API returned ${res.status}`);
-                  return null;
-                }
-                const data = await res.json();
-                const summary = data.content?.[0]?.text?.trim();
-                return summary || null;
-              } catch (e) {
-                core.warning(`Claude summarization failed: ${e.message}`);
-                return null;
-              }
             }
 
             // ── Determine event type & PR info ───────────────────────
@@ -542,14 +505,15 @@ jobs:
               }
               if (reviewerMentions.length) text += `\ncc ${reviewerMentions.join(', ')}`;
 
-              // Summarize any additional text the user included with @pr-ready
-              if (additionalInfo) {
-                const summary = await summarizeText(additionalInfo);
-                text += `\n\n───\n${summary || additionalInfo}`;
-              }
-
-              await postThreadReply(existingSlackTs, text);
+              const replyTs = await postThreadReply(existingSlackTs, text);
               await updateParentMessage(existingSlackTs, 'ready', authorMention, reviewerMentions);
+
+              // Output raw text for LLM summarization in a follow-up step
+              if (additionalInfo && replyTs) {
+                core.setOutput('summary_input', additionalInfo);
+                core.setOutput('reply_ts', replyTs);
+                core.setOutput('thread_ts', existingSlackTs);
+              }
               return;
             }
 
@@ -595,20 +559,19 @@ jobs:
                 'review-changes-requested': `:repeat: ${mention} reviewed this PR — *requested changes*`,
                 'review-commented':         `:speech_balloon: ${mention} reviewed this PR — *commented*`,
               };
-              let text = msgs[action];
-
-              // Summarize the review body if present
-              const reviewBody = (context.payload.review.body || '').trim();
-              if (reviewBody) {
-                const summary = await summarizeText(reviewBody);
-                text += `\n\n───\n${summary || reviewBody}`;
-              }
-
-              await postThreadReply(existingSlackTs, text);
+              const replyTs = await postThreadReply(existingSlackTs, msgs[action]);
               // Re-fetch reviewers so the parent message stays up to date
               // (a new reviewer may have just submitted their first review)
               const reviewerMentions = await getReviewerMentions();
               await updateParentMessage(existingSlackTs, action, authorMention, reviewerMentions);
+
+              // Output review body for LLM summarization in a follow-up step
+              const reviewBody = (context.payload.review.body || '').trim();
+              if (reviewBody && replyTs) {
+                core.setOutput('summary_input', reviewBody);
+                core.setOutput('reply_ts', replyTs);
+                core.setOutput('thread_ts', existingSlackTs);
+              }
               return;
             }
 
@@ -648,3 +611,67 @@ jobs:
               issue_number: prNumber,
               body: `<!-- slack-notify-ts:${slackTs} -->\n:white_check_mark: Slack notification sent to *#${channelName}*.`,
             });
+
+      # ── LLM summarization of review/comment text ──────────────
+      # Uses claude-code-action (which handles OAuth token natively)
+      # to summarize the raw text, then updates the Slack reply.
+      - name: Checkout for Claude Code Action
+        if: steps.slack-notify.outputs.summary_input != ''
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Summarize with Claude
+        id: summarize
+        if: steps.slack-notify.outputs.summary_input != ''
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            Summarize the following PR review comment in 1-2 concise sentences for a Slack notification. Keep it short and to the point. Do not use markdown formatting. If the text is already short enough (one sentence), just return it as-is. Return ONLY the summary text, nothing else.
+
+            ${{ steps.slack-notify.outputs.summary_input }}
+
+      - name: Update Slack reply with summary
+        if: steps.summarize.outputs.result != ''
+        uses: actions/github-script@v7
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          SUMMARY: ${{ steps.summarize.outputs.result }}
+          REPLY_TS: ${{ steps.slack-notify.outputs.reply_ts }}
+          THREAD_TS: ${{ steps.slack-notify.outputs.thread_ts }}
+        with:
+          script: |
+            const slackToken = process.env.SLACK_BOT_TOKEN;
+            const channelId = process.env.SLACK_CHANNEL_ID;
+            const summary = process.env.SUMMARY.trim();
+            const replyTs = process.env.REPLY_TS;
+
+            if (!summary || !replyTs) return;
+
+            // Fetch the current reply text so we can append the summary
+            const getRes = await fetch(
+              `https://slack.com/api/conversations.replies?channel=${channelId}&ts=${replyTs}&limit=1`,
+              { headers: { Authorization: `Bearer ${slackToken}` } }
+            );
+            const getData = await getRes.json();
+            const currentText = getData.messages?.[0]?.text || '';
+
+            const updatedText = `${currentText}\n\n───\n${summary}`;
+
+            const updateRes = await fetch('https://slack.com/api/chat.update', {
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${slackToken}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                channel: channelId,
+                ts: replyTs,
+                text: updatedText,
+                blocks: [{ type: 'section', text: { type: 'mrkdwn', text: updatedText } }],
+              }),
+            });
+            const updateData = await updateRes.json();
+            if (!updateData.ok) core.warning(`Failed to update reply with summary: ${updateData.error}`);
