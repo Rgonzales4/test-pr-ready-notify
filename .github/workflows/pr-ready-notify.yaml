@@ -95,11 +95,13 @@ jobs:
             } else if (eventName === 'pull_request_review') {
               pr = context.payload.pull_request;
               const review = context.payload.review;
-              if (review.state === 'approved') {
+              const reviewState = review.state.toLowerCase();
+              core.info(`Review state: "${review.state}" (normalized: "${reviewState}")`);
+              if (reviewState === 'approved') {
                 action = 'review-approved';
-              } else if (review.state === 'changes_requested') {
+              } else if (reviewState === 'changes_requested') {
                 action = 'review-changes-requested';
-              } else if (review.state === 'commented') {
+              } else if (reviewState === 'commented') {
                 action = 'review-commented';
               } else {
                 core.info(`Skipping review event: state=${review.state}`);
