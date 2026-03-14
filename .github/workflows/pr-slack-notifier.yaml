@@ -100,7 +100,7 @@ jobs:
         uses: actions/github-script@v7
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          NOTIFY_PR_SLACK_CHANNEL_ID: ${{ vars.NOTIFY_PR_SLACK_CHANNEL_ID }}
           RAW_TEXT: ${{ steps.extract.outputs.text || '' }}
           CLAUDE_SUCCESS: ${{ steps.summarize.outcome == 'success' }}
           CLAUDE_RESULT: ${{ steps.summarize.outputs.result || '' }}
@@ -108,7 +108,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const slackToken = process.env.SLACK_BOT_TOKEN;
-            const channelId = process.env.SLACK_CHANNEL_ID;
+            const channelId = process.env.NOTIFY_PR_SLACK_CHANNEL_ID;
 
             // ── Slack API helper ─────────────────────────────────────
             // Wraps fetch with auth header, scope diagnostics on first

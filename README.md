@@ -122,7 +122,7 @@ GitHub-hosted runners (required for `ubuntu-latest`) aren't available on private
 | Secret | Required | Description |
 |--------|----------|-------------|
 | `SLACK_BOT_TOKEN` | Yes | The `xoxb-...` Bot User OAuth Token from step 1 |
-| `SLACK_CHANNEL_ID` | Yes | Channel ID (right-click channel → View channel details → copy ID at bottom) |
+| `NOTIFY_PR_SLACK_CHANNEL_ID` | Yes | Channel ID (right-click channel → View channel details → copy ID at bottom) |
 | `CLAUDE_CODE_OAUTH_TOKEN` | No | Claude Code OAuth token for LLM-powered comment/review summarization via `anthropics/claude-code-action`. Uses your existing Claude subscription — no separate API key needed. If omitted, summaries are skipped. |
 
 ### 3. Pin the user mapping message
