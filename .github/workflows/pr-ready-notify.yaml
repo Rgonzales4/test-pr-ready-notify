@@ -322,62 +322,28 @@ jobs:
             }
 
             // ==========================================================
-            // Reaction management helper
-            // ==========================================================
-            async function setReactions(ts, { add = [], remove = [] } = {}) {
-              // Add the new reaction FIRST to ensure it's visible even if removes fail
-              for (const name of add) {
-                try {
-                  core.info(`reactions.add: attempting :${name}: on ts=${ts}`);
-                  const result = await slackApi('reactions.add', {
-                    body: { channel: channelId, timestamp: ts, name },
-                  });
-                  if (!result.ok && result.error !== 'already_reacted') {
-                    core.warning(`reactions.add(${name}) failed: ${JSON.stringify(result)}`);
-                  } else {
-                    core.info(`Reaction :${name}: ${result.ok ? 'added' : 'already present'}`);
-                  }
-                } catch (e) {
-                  core.warning(`reactions.add(${name}) threw: ${e.message}`);
-                }
-              }
-              // Then remove old status reactions
-              for (const name of remove) {
-                try {
-                  core.info(`reactions.remove: attempting :${name}: on ts=${ts}`);
-                  const result = await slackApi('reactions.remove', {
-                    body: { channel: channelId, timestamp: ts, name },
-                  });
-                  if (result.ok) {
-                    core.info(`Reaction :${name}: removed`);
-                  } else if (result.error === 'no_reaction') {
-                    core.info(`Reaction :${name}: was not present, skipping`);
-                  } else {
-                    core.warning(`reactions.remove(${name}) failed: ${JSON.stringify(result)}`);
-                  }
-                } catch (e) {
-                  core.warning(`reactions.remove(${name}) threw: ${e.message}`);
-                }
-              }
-            }
-
-            // Bot-managed status reactions on parent message — mutually exclusive.
-            // Only one status reaction at a time; all others are removed before adding the new one.
-            // Users may add their own reactions (e.g. :eyes:) which are left untouched.
+            // Bot-managed status emoji on parent message — mutually exclusive.
+            // Only one status at a time, shown as emoji prefix in the message text
+            // AND as a reaction (if reactions:write scope is available).
             const ALL_STATUS_REACTIONS = ['bell', 'white_check_mark', 'repeat', 'speech_balloon', 'pencil2', 'tada', 'no_entry'];
 
             const STATUS_CONFIG = {
-              'ready':                    { label: '',                      reaction: 'bell' },
-              'converted-to-draft':       { label: ' [Draft]',             reaction: 'pencil2' },
-              'review-approved':          { label: '',                      reaction: 'white_check_mark' },
-              'review-commented':         { label: '',                      reaction: 'speech_balloon' },
-              'review-changes-requested': { label: ' [Changes Requested]', reaction: 'repeat' },
-              'merged':                   { label: ' [Merged]',            reaction: 'tada' },
-              'closed':                   { label: ' [Closed]',            reaction: 'no_entry' },
+              'ready':                    { emoji: ':bell:',              label: '' },
+              'converted-to-draft':       { emoji: ':pencil2:',          label: ' [Draft]' },
+              'review-approved':          { emoji: ':white_check_mark:', label: '' },
+              'review-commented':         { emoji: ':speech_balloon:',   label: '' },
+              'review-changes-requested': { emoji: ':repeat:',           label: ' [Changes Requested]' },
+              'merged':                   { emoji: ':tada:',             label: ' [Merged]' },
+              'closed':                   { emoji: ':no_entry:',         label: ' [Closed]' },
             };
 
+            // Map emoji shortcode (e.g. ':bell:') to reaction name (e.g. 'bell')
+            function emojiToReaction(emoji) {
+              return emoji.replace(/:/g, '');
+            }
+
             // ==========================================================
-            // Update parent message status (text label + reactions)
+            // Update parent message status (emoji in text + reaction)
             // ==========================================================
             async function updateParentMessage(ts, statusKey, authorMention) {
               const config = STATUS_CONFIG[statusKey];
@@ -386,12 +352,13 @@ jobs:
                 return;
               }
 
-              core.info(`Updating parent message: status="${statusKey}", reaction=:${config.reaction}:`);
+              const reactionName = emojiToReaction(config.emoji);
+              core.info(`Updating parent message: status="${statusKey}", emoji=${config.emoji}, reaction=${reactionName}`);
 
-              // Update message text with status label
+              // Update message text — emoji prefix is the primary status indicator
               const statusText = config.label
-                ? `*PR by ${authorMention}${config.label}:* ${prUrl}`
-                : `*PR by ${authorMention} is ready for review:* ${prUrl}`;
+                ? `${config.emoji} *PR by ${authorMention}${config.label}:* ${prUrl}`
+                : `${config.emoji} *PR by ${authorMention} is ready for review:* ${prUrl}`;
               const blocks = [
                 {
                   type: 'section',
@@ -403,15 +370,48 @@ jobs:
                 const result = await slackApi('chat.update', {
                   body: { channel: channelId, ts, text: statusText, blocks },
                 });
-                if (!result.ok) core.warning(`chat.update failed: ${result.error}`);
+                if (!result.ok) {
+                  core.warning(`chat.update failed: ${result.error}`);
+                } else {
+                  core.info('Parent message text updated successfully');
+                }
               } catch (e) {
                 core.warning(`Failed to update parent message: ${e.message}`);
               }
 
-              // Status reactions are mutually exclusive — remove all others, then add current
-              const toRemove = ALL_STATUS_REACTIONS.filter(r => r !== config.reaction);
-              core.info(`Reactions: removing [${toRemove.join(', ')}], adding [${config.reaction}]`);
-              await setReactions(ts, { remove: toRemove, add: [config.reaction] });
+              // Also manage reactions — add current, remove all others
+              // (requires reactions:write scope on the Slack bot)
+              const othersToRemove = ALL_STATUS_REACTIONS.filter(r => r !== reactionName);
+
+              // Add the new reaction
+              try {
+                const addResult = await slackApi('reactions.add', {
+                  body: { channel: channelId, timestamp: ts, name: reactionName },
+                });
+                if (!addResult.ok && addResult.error !== 'already_reacted') {
+                  core.warning(`reactions.add(${reactionName}) failed: ${addResult.error}`);
+                } else {
+                  core.info(`Reaction :${reactionName}: ${addResult.ok ? 'added' : 'already present'}`);
+                }
+              } catch (e) {
+                core.warning(`reactions.add(${reactionName}) threw: ${e.message}`);
+              }
+
+              // Remove all other status reactions the bot may have previously added
+              for (const name of othersToRemove) {
+                try {
+                  const rmResult = await slackApi('reactions.remove', {
+                    body: { channel: channelId, timestamp: ts, name },
+                  });
+                  if (rmResult.ok) {
+                    core.info(`Reaction :${name}: removed`);
+                  } else if (rmResult.error !== 'no_reaction') {
+                    core.warning(`reactions.remove(${name}) failed: ${rmResult.error}`);
+                  }
+                } catch (e) {
+                  // Ignore — reaction may not exist
+                }
+              }
             }
 
             // ==========================================================
