@@ -353,7 +353,7 @@ jobs:
               }
 
               const reactionName = emojiToReaction(config.emoji);
-              core.info(`Updating parent message: status="${statusKey}", emoji=${config.emoji}, reaction=${reactionName}`);
+              core.info(`>>> updateParentMessage called: status="${statusKey}", emoji=${config.emoji}, reaction=${reactionName}, ts=${ts}`);
 
               // Update message text — emoji prefix is the primary status indicator
               const statusText = config.label
@@ -366,52 +366,44 @@ jobs:
                 },
               ];
 
+              const updateBody = { channel: channelId, ts, text: statusText, blocks };
+              core.info(`>>> chat.update body: ${JSON.stringify({ channel: channelId, ts, text: statusText.substring(0, 80) })}`);
+
               try {
-                const result = await slackApi('chat.update', {
-                  body: { channel: channelId, ts, text: statusText, blocks },
-                });
-                if (!result.ok) {
-                  core.warning(`chat.update failed: ${result.error}`);
-                } else {
-                  core.info('Parent message text updated successfully');
-                }
+                const result = await slackApi('chat.update', { body: updateBody });
+                core.info(`>>> chat.update response: ok=${result.ok}, error=${result.error || 'none'}, ts=${result.ts || 'none'}`);
               } catch (e) {
-                core.warning(`Failed to update parent message: ${e.message}`);
+                core.warning(`>>> chat.update THREW: ${e.message}`);
               }
 
-              // Also manage reactions — add current, remove all others
+              // Manage reactions — add current, remove all others
               // (requires reactions:write scope on the Slack bot)
               const othersToRemove = ALL_STATUS_REACTIONS.filter(r => r !== reactionName);
 
-              // Add the new reaction
               try {
                 const addResult = await slackApi('reactions.add', {
                   body: { channel: channelId, timestamp: ts, name: reactionName },
                 });
-                if (!addResult.ok && addResult.error !== 'already_reacted') {
-                  core.warning(`reactions.add(${reactionName}) failed: ${addResult.error}`);
-                } else {
-                  core.info(`Reaction :${reactionName}: ${addResult.ok ? 'added' : 'already present'}`);
-                }
+                core.info(`>>> reactions.add(${reactionName}): ok=${addResult.ok}, error=${addResult.error || 'none'}`);
               } catch (e) {
-                core.warning(`reactions.add(${reactionName}) threw: ${e.message}`);
+                core.warning(`>>> reactions.add(${reactionName}) THREW: ${e.message}`);
               }
 
-              // Remove all other status reactions the bot may have previously added
               for (const name of othersToRemove) {
                 try {
                   const rmResult = await slackApi('reactions.remove', {
                     body: { channel: channelId, timestamp: ts, name },
                   });
                   if (rmResult.ok) {
-                    core.info(`Reaction :${name}: removed`);
+                    core.info(`>>> reactions.remove(${name}): removed`);
                   } else if (rmResult.error !== 'no_reaction') {
-                    core.warning(`reactions.remove(${name}) failed: ${rmResult.error}`);
+                    core.info(`>>> reactions.remove(${name}): ${rmResult.error}`);
                   }
                 } catch (e) {
-                  // Ignore — reaction may not exist
+                  // Ignore
                 }
               }
+              core.info(`>>> updateParentMessage DONE for "${statusKey}"`);
             }
 
             // ==========================================================
