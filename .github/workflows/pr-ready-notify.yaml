@@ -130,12 +130,6 @@ jobs:
               else { core.info(`Skipping review: state=${state}`); return; }
             }
 
-            // Skip bot-authored PRs (e.g. Dependabot, Renovate)
-            if (pr.user.type === 'Bot') {
-              core.info(`Skipping bot PR by ${pr.user.login}`);
-              return;
-            }
-
             const prNumber = pr.number;
             const prTitle  = pr.title;
             const prUrl    = pr.html_url;

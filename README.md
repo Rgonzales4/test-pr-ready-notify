@@ -66,8 +66,6 @@ For `@pr-ready` comments, the bot posts a PR comment and does **not** notify Sla
 
 Draft PRs do **not** trigger a Slack notification when opened. The first message is only sent when the PR is opened as non-draft or transitions from draft to ready.
 
-Bot-authored PRs (e.g. Dependabot, Renovate) are silently skipped.
-
 Inline-only review comments (no formal review body) are filtered out to reduce thread noise.
 
 For other lifecycle events (review, close, merge, draft conversion), if no existing Slack thread is found, the event is silently skipped.
