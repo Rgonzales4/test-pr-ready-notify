@@ -104,18 +104,25 @@ jobs:
             }
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-              // The execution output contains a result array; extract text blocks
-              const resultEntry = data.find(e => e.type === 'result');
-              if (resultEntry && resultEntry.result) {
-                const text = resultEntry.result
+              const resultEntry = Array.isArray(data)
+                ? data.find(e => e.type === 'result')
+                : data;
+              if (!resultEntry) return;
+
+              const r = resultEntry.result;
+              let text = '';
+              if (typeof r === 'string') {
+                text = r.trim();
+              } else if (Array.isArray(r)) {
+                text = r
                   .filter(b => b.type === 'text')
                   .map(b => b.text)
                   .join('\n')
                   .trim();
-                if (text) {
-                  core.setOutput('summary', text);
-                  core.info(`Extracted summary: ${text.substring(0, 100)}...`);
-                }
+              }
+              if (text) {
+                core.setOutput('summary', text);
+                core.info(`Extracted summary: ${text.substring(0, 100)}`);
               }
             } catch (e) {
               core.warning(`Failed to parse execution file: ${e.message}`);
