@@ -102,7 +102,7 @@ jobs:
                 const res = await fetch('https://api.anthropic.com/v1/messages', {
                   method: 'POST',
                   headers: {
-                    'x-api-key': anthropicKey,
+                    'Authorization': `Bearer ${anthropicKey}`,
                     'anthropic-version': '2023-06-01',
                     'Content-Type': 'application/json',
                   },
