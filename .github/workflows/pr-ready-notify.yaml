@@ -139,26 +139,6 @@ jobs:
                 });
                 return;
               }
-
-              // Check if already fully approved
-              const reviews = await github.paginate(github.rest.pulls.listReviews, {
-                ...context.repo, pull_number: prNumber, per_page: 100,
-              });
-              const latestByReviewer = new Map();
-              for (const r of reviews) {
-                if (r.state !== 'COMMENTED') latestByReviewer.set(r.user.login, r.state);
-              }
-              const allApproved = latestByReviewer.size > 0
-                && [...latestByReviewer.values()].every(s => s === 'APPROVED');
-              const noPending = pr.requested_reviewers.length === 0
-                && (pr.requested_teams?.length ?? 0) === 0;
-              if (allApproved && noPending) {
-                await github.rest.issues.createComment({
-                  ...context.repo, issue_number: prNumber,
-                  body: '> [!NOTE]\n> This PR already has all required approvals and no pending reviewers.\n> No further review is required unless changes are requested.',
-                });
-                return;
-              }
             }
 
             // ==========================================================
