@@ -39,46 +39,53 @@ jobs:
       # ── Step 1: Extract text that may need summarization ──────
       # Lightweight step that pulls out review body or @pr-ready
       # additional text so it can be summarized before posting.
+      # Extract text and decide if LLM summarization is needed.
+      # Short text (≤150 chars) is used as-is to skip the slow Claude step.
       - name: Extract text to summarize
         id: extract
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
+            const MAX_SHORT = 150;
             const eventName = context.eventName;
+            let raw = '';
 
             if (eventName === 'pull_request_review') {
-              // Skip bot reviews
               if (context.payload.review.user.type === 'Bot') return;
-              const body = (context.payload.review.body || '').trim();
-              if (body) {
-                core.setOutput('text', body);
-                core.info(`Extracted review body (${body.length} chars)`);
-              }
+              raw = (context.payload.review.body || '').trim();
             } else if (eventName === 'issue_comment') {
               const commentBody = context.payload.comment.body || '';
               if (!commentBody.toLowerCase().includes('@pr-ready')) return;
-              // Extract everything that isn't the @pr-ready line itself
-              const additional = commentBody
+              raw = commentBody
                 .split('\n')
                 .filter(l => !l.trim().toLowerCase().startsWith('@pr-ready'))
                 .join('\n').trim();
-              if (additional) {
-                core.setOutput('text', additional);
-                core.info(`Extracted @pr-ready additional text (${additional.length} chars)`);
-              }
             }
 
-      # ── Step 2: Summarize with Claude (if there's text) ───────
+            if (!raw) return;
+
+            if (raw.length <= MAX_SHORT) {
+              // Short enough — use as-is, skip Claude
+              core.setOutput('summary', raw);
+              core.info(`Short text (${raw.length} chars) — skipping LLM`);
+            } else {
+              // Long text — needs LLM summarization
+              core.setOutput('text', raw);
+              core.setOutput('needs_llm', 'true');
+              core.info(`Long text (${raw.length} chars) — needs LLM`);
+            }
+
+      # ── Summarize with Claude (only for long text) ────────────
       - name: Checkout for Claude Code Action
-        if: steps.extract.outputs.text != ''
+        if: steps.extract.outputs.needs_llm == 'true'
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
       - name: Summarize with Claude
         id: summarize
-        if: steps.extract.outputs.text != ''
+        if: steps.extract.outputs.needs_llm == 'true'
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -87,7 +94,6 @@ jobs:
 
             ${{ steps.extract.outputs.text }}
 
-      # Extract the summary text from the Claude execution output JSON
       - name: Parse Claude summary
         id: parse-summary
         if: steps.summarize.outputs.execution_file != ''
@@ -135,7 +141,7 @@ jobs:
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
-          LLM_SUMMARY: ${{ steps.parse-summary.outputs.summary }}
+          LLM_SUMMARY: ${{ steps.parse-summary.outputs.summary || steps.extract.outputs.summary }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
