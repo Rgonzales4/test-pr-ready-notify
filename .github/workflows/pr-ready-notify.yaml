@@ -95,11 +95,13 @@ jobs:
             } else if (eventName === 'pull_request_review') {
               pr = context.payload.pull_request;
               const review = context.payload.review;
-              if (review.state === 'approved') {
+              const reviewState = review.state.toLowerCase();
+              core.info(`Review state: "${review.state}" (normalized: "${reviewState}")`);
+              if (reviewState === 'approved') {
                 action = 'review-approved';
-              } else if (review.state === 'changes_requested') {
+              } else if (reviewState === 'changes_requested') {
                 action = 'review-changes-requested';
-              } else if (review.state === 'commented') {
+              } else if (reviewState === 'commented') {
                 action = 'review-commented';
               } else {
                 core.info(`Skipping review event: state=${review.state}`);
@@ -136,26 +138,6 @@ jobs:
                 await github.rest.issues.createComment({
                   ...context.repo, issue_number: prNumber,
                   body: '> [!WARNING]\n> This PR is currently marked as *Draft*.\n⚠️ Next steps: Convert the PR to ready-for-review status before requesting reviews.',
-                });
-                return;
-              }
-
-              // Check if already fully approved
-              const reviews = await github.paginate(github.rest.pulls.listReviews, {
-                ...context.repo, pull_number: prNumber, per_page: 100,
-              });
-              const latestByReviewer = new Map();
-              for (const r of reviews) {
-                if (r.state !== 'COMMENTED') latestByReviewer.set(r.user.login, r.state);
-              }
-              const allApproved = latestByReviewer.size > 0
-                && [...latestByReviewer.values()].every(s => s === 'APPROVED');
-              const noPending = pr.requested_reviewers.length === 0
-                && (pr.requested_teams?.length ?? 0) === 0;
-              if (allApproved && noPending) {
-                await github.rest.issues.createComment({
-                  ...context.repo, issue_number: prNumber,
-                  body: '> [!NOTE]\n> This PR already has all required approvals and no pending reviewers.\n> No further review is required unless changes are requested.',
                 });
                 return;
               }
@@ -340,56 +322,43 @@ jobs:
             }
 
             // ==========================================================
-            // Reaction management helper
-            // ==========================================================
-            async function setReactions(ts, { add = [], remove = [] } = {}) {
-              for (const name of remove) {
-                try {
-                  await slackApi('reactions.remove', {
-                    body: { channel: channelId, timestamp: ts, name },
-                  });
-                } catch (e) {
-                  // Ignore — reaction may not exist
-                }
-              }
-              for (const name of add) {
-                try {
-                  await slackApi('reactions.add', {
-                    body: { channel: channelId, timestamp: ts, name },
-                  });
-                } catch (e) {
-                  // Ignore — may already be reacted
-                }
-              }
-            }
+            // Bot-managed status emoji on parent message — mutually exclusive.
+            // Only one status at a time, shown as emoji prefix in the message text
+            // AND as a reaction (if reactions:write scope is available).
+            const ALL_STATUS_REACTIONS = ['bell', 'white_check_mark', 'repeat', 'speech_balloon', 'pencil2', 'tada', 'no_entry'];
 
-            // Status reactions for parent message (eyes is added by reviewers, not the bot)
-            // No emoji       = Waiting for reviews
-            // :eyes:         = Reviewing (added manually by reviewers on Slack)
-            // :speech_balloon: = Review submitted (comment only)
-            // :repeat:       = Changes requested
-            // :white_check_mark: = Approved and merged (done)
-            // :no_entry:     = Closed
             const STATUS_CONFIG = {
-              'ready':                    { label: '',                     reactions: { add: [],                    remove: ['repeat', 'speech_balloon'] } },
-              'converted-to-draft':       { label: ' [Draft]',            reactions: { add: [],                    remove: [] } },
-              'review-commented':         { label: '',                     reactions: { add: ['speech_balloon'],    remove: [] } },
-              'review-changes-requested': { label: ' [Changes Requested]',reactions: { add: ['repeat'],            remove: ['speech_balloon'] } },
-              'merged':                   { label: ' [Merged]',           reactions: { add: ['white_check_mark'],  remove: ['repeat', 'speech_balloon', 'no_entry'] } },
-              'closed':                   { label: ' [Closed]',            reactions: { add: ['no_entry'],          remove: ['repeat', 'speech_balloon'] } },
+              'ready':                    { emoji: ':bell:',              label: '' },
+              'converted-to-draft':       { emoji: ':pencil2:',          label: ' [Draft]' },
+              'review-approved':          { emoji: ':white_check_mark:', label: '' },
+              'review-commented':         { emoji: ':speech_balloon:',   label: '' },
+              'review-changes-requested': { emoji: ':repeat:',           label: ' [Changes Requested]' },
+              'merged':                   { emoji: ':tada:',             label: ' [Merged]' },
+              'closed':                   { emoji: ':no_entry:',         label: ' [Closed]' },
             };
 
+            // Map emoji shortcode (e.g. ':bell:') to reaction name (e.g. 'bell')
+            function emojiToReaction(emoji) {
+              return emoji.replace(/:/g, '');
+            }
+
             // ==========================================================
-            // Update parent message status (text label + reactions)
+            // Update parent message status (emoji in text + reaction)
             // ==========================================================
             async function updateParentMessage(ts, statusKey, authorMention) {
               const config = STATUS_CONFIG[statusKey];
-              if (!config) return;
+              if (!config) {
+                core.warning(`No STATUS_CONFIG for key: "${statusKey}"`);
+                return;
+              }
 
-              // Update message text with status label
+              const reactionName = emojiToReaction(config.emoji);
+              core.info(`>>> updateParentMessage called: status="${statusKey}", emoji=${config.emoji}, reaction=${reactionName}, ts=${ts}`);
+
+              // Update message text — emoji prefix is the primary status indicator
               const statusText = config.label
-                ? `*PR by ${authorMention}${config.label}:* ${prUrl}`
-                : `*PR by ${authorMention} is ready for review:* ${prUrl}`;
+                ? `${config.emoji} *PR by ${authorMention}${config.label}:* ${prUrl}`
+                : `${config.emoji} *PR by ${authorMention} is ready for review:* ${prUrl}`;
               const blocks = [
                 {
                   type: 'section',
@@ -397,16 +366,44 @@ jobs:
                 },
               ];
 
+              const updateBody = { channel: channelId, ts, text: statusText, blocks };
+              core.info(`>>> chat.update body: ${JSON.stringify({ channel: channelId, ts, text: statusText.substring(0, 80) })}`);
+
               try {
-                const result = await slackApi('chat.update', {
-                  body: { channel: channelId, ts, text: statusText, blocks },
-                });
-                if (!result.ok) core.warning(`chat.update failed: ${result.error}`);
+                const result = await slackApi('chat.update', { body: updateBody });
+                core.info(`>>> chat.update response: ok=${result.ok}, error=${result.error || 'none'}, ts=${result.ts || 'none'}`);
               } catch (e) {
-                core.warning(`Failed to update parent message: ${e.message}`);
+                core.warning(`>>> chat.update THREW: ${e.message}`);
               }
 
-              await setReactions(ts, config.reactions);
+              // Manage reactions — add current, remove all others
+              // (requires reactions:write scope on the Slack bot)
+              const othersToRemove = ALL_STATUS_REACTIONS.filter(r => r !== reactionName);
+
+              try {
+                const addResult = await slackApi('reactions.add', {
+                  body: { channel: channelId, timestamp: ts, name: reactionName },
+                });
+                core.info(`>>> reactions.add(${reactionName}): ok=${addResult.ok}, error=${addResult.error || 'none'}`);
+              } catch (e) {
+                core.warning(`>>> reactions.add(${reactionName}) THREW: ${e.message}`);
+              }
+
+              for (const name of othersToRemove) {
+                try {
+                  const rmResult = await slackApi('reactions.remove', {
+                    body: { channel: channelId, timestamp: ts, name },
+                  });
+                  if (rmResult.ok) {
+                    core.info(`>>> reactions.remove(${name}): removed`);
+                  } else if (rmResult.error !== 'no_reaction') {
+                    core.info(`>>> reactions.remove(${name}): ${rmResult.error}`);
+                  }
+                } catch (e) {
+                  // Ignore
+                }
+              }
+              core.info(`>>> updateParentMessage DONE for "${statusKey}"`);
             }
 
             // ==========================================================
@@ -574,13 +571,13 @@ jobs:
 
               if (action === 'review-approved') {
                 await postThreadReply(existingSlackTs, `:white_check_mark: ${reviewerMention} reviewed this PR — *approved*`);
-                // white_check_mark reaction is only added on merge (approved + merged = done)
+                await updateParentMessage(existingSlackTs, 'review-approved', authorMention);
               } else if (action === 'review-changes-requested') {
                 await postThreadReply(existingSlackTs, `:repeat: ${reviewerMention} reviewed this PR — *requested changes*`);
                 await updateParentMessage(existingSlackTs, 'review-changes-requested', authorMention);
               } else {
                 await postThreadReply(existingSlackTs, `:speech_balloon: ${reviewerMention} reviewed this PR — *commented*`);
-                await setReactions(existingSlackTs, STATUS_CONFIG['review-commented'].reactions);
+                await updateParentMessage(existingSlackTs, 'review-commented', authorMention);
               }
               return;
             }
