@@ -87,14 +87,48 @@ jobs:
 
             ${{ steps.extract.outputs.text }}
 
-      # ── Step 3: Main Slack notification ───────────────────────
+      # Extract the summary text from the Claude execution output JSON
+      - name: Parse Claude summary
+        id: parse-summary
+        if: steps.summarize.outputs.execution_file != ''
+        uses: actions/github-script@v7
+        env:
+          EXECUTION_FILE: ${{ steps.summarize.outputs.execution_file }}
+        with:
+          script: |
+            const fs = require('fs');
+            const filePath = process.env.EXECUTION_FILE;
+            if (!filePath || !fs.existsSync(filePath)) {
+              core.info('No execution file found');
+              return;
+            }
+            try {
+              const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+              // The execution output contains a result array; extract text blocks
+              const resultEntry = data.find(e => e.type === 'result');
+              if (resultEntry && resultEntry.result) {
+                const text = resultEntry.result
+                  .filter(b => b.type === 'text')
+                  .map(b => b.text)
+                  .join('\n')
+                  .trim();
+                if (text) {
+                  core.setOutput('summary', text);
+                  core.info(`Extracted summary: ${text.substring(0, 100)}...`);
+                }
+              }
+            } catch (e) {
+              core.warning(`Failed to parse execution file: ${e.message}`);
+            }
+
+      # ── Step 4: Main Slack notification ───────────────────────
       - name: PR lifecycle Slack notification
         id: slack-notify
         uses: actions/github-script@v7
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
-          LLM_SUMMARY: ${{ steps.summarize.outputs.result }}
+          LLM_SUMMARY: ${{ steps.parse-summary.outputs.summary }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
