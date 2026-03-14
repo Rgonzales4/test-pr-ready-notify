@@ -2,9 +2,13 @@
 
 Test repo for the PR lifecycle Slack notification workflow.
 
+# `pr-slack-notifier` Workflow
+
 ## What it does
 
-Maintains **one Slack message per PR** in a designated channel. All lifecycle events are posted as thread replies, and the parent message text is updated with an emoji prefix showing the current status.
+The `pr-slack-notifier` workflow keeps a Slack channel synchronized with pull request activity by creating one Slack message per PR and posting all lifecycle updates as thread replies, allowing the entire review process to be tracked in a single place. 
+
+It notifies the team when a PR is ready for review, when reviews are submitted, when re-review is requested via `@pr-ready`, and when the PR’s status changes (draft, approved, merged, or closed), while updating the parent message with an emoji that reflects the current state. This approach reduces Slack noise and provides a clear, threaded timeline of the PR review lifecycle.
 
 ### Parent message format
 
