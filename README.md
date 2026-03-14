@@ -55,7 +55,7 @@ The parent message text is updated with an emoji prefix reflecting the latest ev
 
 ### Comment/review summarization
 
-When a review is submitted with a body, or an `@pr-ready` comment includes additional text, the workflow uses Claude via [`anthropics/claude-code-action`](https://github.com/anthropics/claude-code-action) to generate a 1-2 sentence summary. The summary is appended to the Slack thread reply, separated by a divider:
+When a review is submitted with a body, or an `@pr-ready` comment includes additional text, the workflow calls the Anthropic Messages API directly (using `claude-haiku-4-5-20251001`) to generate a 1-2 sentence summary. The summary is appended to the Slack thread reply, separated by a divider:
 
 ```
 :white_check_mark: @reviewer reviewed this PR — approved
@@ -64,7 +64,7 @@ When a review is submitted with a body, or an `@pr-ready` comment includes addit
 Looks good overall, just a minor suggestion on the error handling path.
 ```
 
-If the `CLAUDE_CODE_OAUTH_TOKEN` secret is not set, the summary step is skipped and no additional text is appended. This uses the same OAuth token as the [Claude Code Review workflow](https://github.com/anthropics/claude-code-action), so no separate API key is needed.
+Short text (500 characters or fewer) is included as-is without calling the LLM. If the `ANTHROPIC_API_KEY` secret is not set, the raw text is included without summarization. On API failure, the workflow gracefully falls back to the raw text.
 
 ### When the workflow skips
 
@@ -123,7 +123,7 @@ GitHub-hosted runners (required for `ubuntu-latest`) aren't available on private
 |--------|----------|-------------|
 | `SLACK_BOT_TOKEN` | Yes | The `xoxb-...` Bot User OAuth Token from step 1 |
 | `SLACK_CHANNEL_ID` | Yes | Channel ID (right-click channel → View channel details → copy ID at bottom) |
-| `CLAUDE_CODE_OAUTH_TOKEN` | No | Claude Code OAuth token for LLM-powered comment/review summarization via `anthropics/claude-code-action`. Uses your existing Claude subscription — no separate API key needed. If omitted, summaries are skipped. |
+| `ANTHROPIC_API_KEY` | No | Anthropic API key for LLM-powered comment/review summarization. Create one at [console.anthropic.com](https://console.anthropic.com). If omitted, raw text is included without summarization. |
 
 ### 3. Pin the user mapping message
 
@@ -180,7 +180,6 @@ On subsequent events, the workflow searches channel history (up to 500 messages)
 | `contents` | `read` | Checkout context |
 | `pull-requests` | `write` | Read PR details, list reviews |
 | `issues` | `write` | Post comments on PR threads |
-| `id-token` | `write` | Required by `anthropics/claude-code-action` for OAuth |
 
 ## Testing
 
