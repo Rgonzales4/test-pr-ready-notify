@@ -387,46 +387,67 @@ jobs:
             }
 
             // ── Find existing Slack message for this PR ──────────────
-            // Searches up to 500 messages (5 pages) of channel history.
+            // Fast path: check PR comments for cached ts from a previous
+            // notification (<!-- slack-notify-ts:... -->). Falls back to
+            // channel history search (up to 500 messages) if not found.
             let existingSlackTs = '';
 
             try {
-              let cursor, found = false;
-              for (let page = 0; page < 5 && !found; page++) {
-                const params = { channel: channelId, limit: '100' };
-                if (cursor) params.cursor = cursor;
-                const history = await slackApi('conversations.history', { params });
-                if (!history.ok) break;
-
-                for (const msg of (history.messages || [])) {
-                  const inText = msg.text?.includes(prUrl);
-                  const inBlocks = (function check(nodes) {
-                    if (!nodes) return false;
-                    for (const n of nodes) {
-                      if (typeof n !== 'object') continue;
-                      for (const v of Object.values(n)) {
-                        if (typeof v === 'string') {
-                          if (v.replace(/<([^>|]+)(\|[^>]+)?>/g, '$1').includes(prUrl)) return true;
-                        }
-                        if (Array.isArray(v) && check(v)) return true;
-                        if (typeof v === 'object' && v !== null && check([v])) return true;
-                      }
-                    }
-                    return false;
-                  })(msg.blocks);
-
-                  if (inText || inBlocks) {
-                    existingSlackTs = msg.ts;
-                    found = true;
-                    core.info(`Found existing Slack message: ts=${msg.ts}`);
-                    break;
-                  }
+              const { data: comments } = await github.rest.issues.listComments({
+                ...context.repo, issue_number: prNumber, per_page: 100,
+              });
+              for (const c of comments) {
+                const m = c.body?.match(/<!-- slack-notify-ts:(\S+) -->/);
+                if (m) {
+                  existingSlackTs = m[1];
+                  core.info(`Found cached Slack ts from PR comment: ${existingSlackTs}`);
+                  break;
                 }
-                cursor = history.response_metadata?.next_cursor;
-                if (!cursor) break;
               }
             } catch (e) {
-              core.warning(`Channel history search failed: ${e.message}`);
+              core.warning(`PR comment cache lookup failed: ${e.message}`);
+            }
+
+            // Slow path: search channel history if no cached ts found
+            if (!existingSlackTs) {
+              try {
+                let cursor, found = false;
+                for (let page = 0; page < 5 && !found; page++) {
+                  const params = { channel: channelId, limit: '100' };
+                  if (cursor) params.cursor = cursor;
+                  const history = await slackApi('conversations.history', { params });
+                  if (!history.ok) break;
+
+                  for (const msg of (history.messages || [])) {
+                    const inText = msg.text?.includes(prUrl);
+                    const inBlocks = (function check(nodes) {
+                      if (!nodes) return false;
+                      for (const n of nodes) {
+                        if (typeof n !== 'object') continue;
+                        for (const v of Object.values(n)) {
+                          if (typeof v === 'string') {
+                            if (v.replace(/<([^>|]+)(\|[^>]+)?>/g, '$1').includes(prUrl)) return true;
+                          }
+                          if (Array.isArray(v) && check(v)) return true;
+                          if (typeof v === 'object' && v !== null && check([v])) return true;
+                        }
+                      }
+                      return false;
+                    })(msg.blocks);
+
+                    if (inText || inBlocks) {
+                      existingSlackTs = msg.ts;
+                      found = true;
+                      core.info(`Found existing Slack message via history: ts=${msg.ts}`);
+                      break;
+                    }
+                  }
+                  cursor = history.response_metadata?.next_cursor;
+                  if (!cursor) break;
+                }
+              } catch (e) {
+                core.warning(`Channel history search failed: ${e.message}`);
+              }
             }
 
             // ── Status configuration ─────────────────────────────────
@@ -516,16 +537,17 @@ jobs:
                 core.warning(`reactions.add(${reaction}) threw: ${e.message}`);
               }
 
-              // 3. Remove all other bot-managed status reactions
-              for (const name of ALL_STATUS_REACTIONS) {
-                if (name === reaction) continue;
-                try {
-                  const r = await slackApi('reactions.remove', {
+              // 3. Remove all other bot-managed status reactions (in parallel)
+              const removals = ALL_STATUS_REACTIONS
+                .filter(name => name !== reaction)
+                .map(name =>
+                  slackApi('reactions.remove', {
                     body: { channel: channelId, timestamp: ts, name },
-                  });
-                  if (!r.ok && r.error !== 'no_reaction') core.warning(`reactions.remove(${name}): ${r.error}`);
-                } catch (_) { /* not present — ignore */ }
-              }
+                  }).then(r => {
+                    if (!r.ok && r.error !== 'no_reaction') core.warning(`reactions.remove(${name}): ${r.error}`);
+                  }).catch(() => { /* not present — ignore */ })
+                );
+              await Promise.allSettled(removals);
             }
 
             // ── Post a thread reply ──────────────────────────────────
