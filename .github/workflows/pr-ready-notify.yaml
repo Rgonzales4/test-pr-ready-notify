@@ -344,14 +344,19 @@ jobs:
               // Then remove old status reactions
               for (const name of remove) {
                 try {
+                  core.info(`reactions.remove: attempting :${name}: on ts=${ts}`);
                   const result = await slackApi('reactions.remove', {
                     body: { channel: channelId, timestamp: ts, name },
                   });
-                  if (!result.ok && result.error !== 'no_reaction') {
-                    core.warning(`reactions.remove(${name}) failed: ${result.error}`);
+                  if (result.ok) {
+                    core.info(`Reaction :${name}: removed`);
+                  } else if (result.error === 'no_reaction') {
+                    core.info(`Reaction :${name}: was not present, skipping`);
+                  } else {
+                    core.warning(`reactions.remove(${name}) failed: ${JSON.stringify(result)}`);
                   }
                 } catch (e) {
-                  // Ignore — reaction may not exist
+                  core.warning(`reactions.remove(${name}) threw: ${e.message}`);
                 }
               }
             }
