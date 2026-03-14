@@ -327,20 +327,28 @@ jobs:
             async function setReactions(ts, { add = [], remove = [] } = {}) {
               for (const name of remove) {
                 try {
-                  await slackApi('reactions.remove', {
+                  const result = await slackApi('reactions.remove', {
                     body: { channel: channelId, timestamp: ts, name },
                   });
+                  if (!result.ok && result.error !== 'no_reaction') {
+                    core.warning(`reactions.remove(${name}) failed: ${result.error}`);
+                  }
                 } catch (e) {
                   // Ignore — reaction may not exist
                 }
               }
               for (const name of add) {
                 try {
-                  await slackApi('reactions.add', {
+                  const result = await slackApi('reactions.add', {
                     body: { channel: channelId, timestamp: ts, name },
                   });
+                  if (!result.ok && result.error !== 'already_reacted') {
+                    core.warning(`reactions.add(${name}) failed: ${result.error}`);
+                  } else {
+                    core.info(`Reaction :${name}: ${result.ok ? 'added' : 'already present'}`);
+                  }
                 } catch (e) {
-                  // Ignore — may already be reacted
+                  core.warning(`reactions.add(${name}) threw: ${e.message}`);
                 }
               }
             }
@@ -365,7 +373,12 @@ jobs:
             // ==========================================================
             async function updateParentMessage(ts, statusKey, authorMention) {
               const config = STATUS_CONFIG[statusKey];
-              if (!config) return;
+              if (!config) {
+                core.warning(`No STATUS_CONFIG for key: "${statusKey}"`);
+                return;
+              }
+
+              core.info(`Updating parent message: status="${statusKey}", reaction=:${config.reaction}:`);
 
               // Update message text with status label
               const statusText = config.label
@@ -387,8 +400,9 @@ jobs:
                 core.warning(`Failed to update parent message: ${e.message}`);
               }
 
-              // Status reactions are mutually exclusive — remove all others, add current
+              // Status reactions are mutually exclusive — remove all others, then add current
               const toRemove = ALL_STATUS_REACTIONS.filter(r => r !== config.reaction);
+              core.info(`Reactions: removing [${toRemove.join(', ')}], adding [${config.reaction}]`);
               await setReactions(ts, { remove: toRemove, add: [config.reaction] });
             }
 
