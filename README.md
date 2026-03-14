@@ -6,9 +6,20 @@ Test repo for the PR lifecycle Slack notification workflow.
 
 Maintains **one Slack message per PR** in a designated channel. All lifecycle events are posted as thread replies, and the parent message text is updated with an emoji prefix showing the current status.
 
+### Parent message format
+
+```
+PR #1234 – Improve authentication middleware
+Author: @alice
+Link: https://github.com/org/repo/pull/1234
+Assigned reviewers: @bob @carol
+```
+
+The "Assigned reviewers" line only appears when reviewers are assigned, and updates automatically as reviewers are added or submit reviews.
+
 ### Workflow
 
-1. **PR opened** (non-draft) or **marked ready for review** → Slack message posted to channel, PR author subscribed to thread
+1. **PR opened** (non-draft), **reopened**, or **marked ready for review** → Slack message posted to channel, PR author subscribed to thread
 2. **Reviewer** reacts with :eyes: on the Slack message to indicate they're reviewing
 3. **Review submitted** → thread reply posted: `@reviewer reviewed this PR — approved / requested changes / commented`
 4. **PR author** makes changes, then comments `@pr-ready` → thread reply notifies all PR reviewers it's ready for re-review
@@ -25,7 +36,7 @@ The parent message text is updated with an emoji prefix reflecting the latest ev
 | Converted to draft | :pencil2: | PR converted back to draft |
 | Approved | :white_check_mark: | Review submitted — approved |
 | Changes requested | :repeat: | Review submitted — changes requested |
-| Commented | :speech_balloon: | Review submitted — comment |
+| Commented | :speech_balloon: | Review submitted — comment (formal reviews only, not inline) |
 | Merged | :tada: | PR merged |
 | Closed | :no_entry: | PR closed without merge |
 
@@ -33,7 +44,7 @@ The parent message text is updated with an emoji prefix reflecting the latest ev
 
 | Event | Thread message |
 |-------|---------------|
-| PR opened / ready for review | `PR is ready for review` |
+| PR opened / reopened / ready for review | `PR is ready for review` |
 | `@pr-ready` comment | `:bell: PR is ready for re-review` + cc's all PR reviewers |
 | Converted to draft | `:pencil2: PR has been converted back to draft` |
 | Review — approved | `:white_check_mark: @reviewer reviewed this PR — approved` |
@@ -55,7 +66,19 @@ For `@pr-ready` comments, the bot posts a PR comment and does **not** notify Sla
 
 Draft PRs do **not** trigger a Slack notification when opened. The first message is only sent when the PR is opened as non-draft or transitions from draft to ready.
 
+Bot-authored PRs (e.g. Dependabot, Renovate) are silently skipped.
+
+Inline-only review comments (no formal review body) are filtered out to reduce thread noise.
+
 For other lifecycle events (review, close, merge, draft conversion), if no existing Slack thread is found, the event is silently skipped.
+
+### Concurrency
+
+A concurrency group per PR number ensures that simultaneous events (e.g. merge + close) don't race on the same Slack message.
+
+### Rate limiting
+
+The Slack API helper automatically retries once on `429` (rate limited) responses using the `Retry-After` header.
 
 ## Why a separate repo?
 
@@ -132,8 +155,8 @@ On subsequent events, the workflow searches channel history (up to 500 messages)
 | Event | Types | Purpose |
 |-------|-------|---------|
 | `issue_comment` | `created` | `@pr-ready` re-review requests |
-| `pull_request` | `opened`, `ready_for_review`, `converted_to_draft`, `closed` | PR lifecycle |
-| `pull_request_review` | `submitted` | Review notifications |
+| `pull_request` | `opened`, `reopened`, `ready_for_review`, `converted_to_draft`, `closed` | PR lifecycle |
+| `pull_request_review` | `submitted` | Review notifications (formal reviews only) |
 
 ### Required GitHub token permissions
 
@@ -146,12 +169,15 @@ On subsequent events, the workflow searches channel history (up to 500 messages)
 ## Testing
 
 1. Open a pull request against `master` (non-draft)
-2. Confirm a Slack message appeared in the channel — no emoji (waiting for reviews)
-3. React with :eyes: on the Slack message (as a reviewer would)
-4. Submit a review (approve, request changes, or comment)
-5. Confirm thread reply with review status and parent message emoji updated
-6. Comment `@pr-ready` on the PR
-7. Confirm thread reply mentioning reviewers and parent emoji changed to :bell:
-8. Convert PR to draft → confirm :pencil2: thread reply and emoji
-9. Mark ready for review → confirm thread reply and :bell: emoji
-10. Merge or close → confirm :tada: or :no_entry: thread reply and emoji
+2. Confirm a Slack message appeared in the channel with PR title, author, and link — no emoji (waiting for reviews)
+3. Assign a reviewer on GitHub → confirm "Assigned reviewers" line appears on next update
+4. React with :eyes: on the Slack message (as a reviewer would)
+5. Submit a review (approve, request changes, or comment with a review body)
+6. Confirm thread reply with review status and parent message emoji updated
+7. Comment `@pr-ready` on the PR
+8. Confirm thread reply mentioning reviewers and parent emoji changed to :bell:
+9. Convert PR to draft → confirm :pencil2: thread reply and emoji
+10. Mark ready for review → confirm thread reply and :bell: emoji
+11. Close the PR → confirm :no_entry: thread reply and emoji
+12. Reopen the PR → confirm thread reply and status update
+13. Merge → confirm :tada: thread reply and emoji

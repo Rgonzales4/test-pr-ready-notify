@@ -9,9 +9,14 @@ on:
   issue_comment:
     types: [created]
   pull_request:
-    types: [opened, ready_for_review, converted_to_draft, closed]
+    types: [opened, reopened, ready_for_review, converted_to_draft, closed]
   pull_request_review:
     types: [submitted]
+
+# Prevent concurrent runs for the same PR to avoid race conditions
+# on the Slack message (e.g. merge + close firing simultaneously).
+concurrency:
+  group: pr-notify-${{ github.event.pull_request.number || github.event.issue.number }}
 
 jobs:
   notify-slack:
@@ -43,7 +48,8 @@ jobs:
             const channelId = process.env.SLACK_CHANNEL_ID;
 
             // ── Slack API helper ─────────────────────────────────────
-            // Logs bot OAuth scopes on first call to aid debugging.
+            // Wraps fetch with auth header, scope diagnostics on first
+            // call, and automatic retry on 429 (rate limit).
             let _scopesLogged = false;
 
             async function slackApi(method, options = {}) {
@@ -58,9 +64,20 @@ jobs:
                 fetchOpts.headers['Content-Type'] = 'application/json';
                 fetchOpts.body = JSON.stringify(body);
               }
-              const res = await fetch(url, fetchOpts);
+
+              let res = await fetch(url, fetchOpts);
+
+              // Retry once on rate limit using the Retry-After header
+              if (res.status === 429) {
+                const retryAfter = parseInt(res.headers.get('Retry-After') || '2', 10);
+                core.warning(`Slack rate limited on ${method} — retrying after ${retryAfter}s`);
+                await new Promise(r => setTimeout(r, retryAfter * 1000));
+                res = await fetch(url, fetchOpts);
+              }
+
               if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
 
+              // Log OAuth scopes on first successful call to aid debugging
               if (!_scopesLogged) {
                 const scopes = res.headers.get('x-oauth-scopes');
                 core.info(`Bot OAuth scopes: ${scopes}`);
@@ -86,22 +103,41 @@ jobs:
             } else if (eventName === 'pull_request') {
               pr = context.payload.pull_request;
               const ghAction = context.payload.action;
-              if (ghAction === 'opened' && !pr.draft) action = 'opened';
-              else if (ghAction === 'ready_for_review')    action = 'ready-for-review';
-              else if (ghAction === 'converted_to_draft')  action = 'converted-to-draft';
-              else if (ghAction === 'closed' && pr.merged) action = 'merged';
-              else if (ghAction === 'closed')              action = 'closed';
+              if (ghAction === 'opened' && !pr.draft)      action = 'opened';
+              else if (ghAction === 'reopened' && !pr.draft) action = 'reopened';
+              else if (ghAction === 'ready_for_review')      action = 'ready-for-review';
+              else if (ghAction === 'converted_to_draft')    action = 'converted-to-draft';
+              else if (ghAction === 'closed' && pr.merged)   action = 'merged';
+              else if (ghAction === 'closed')                action = 'closed';
               else { core.info(`Skipping: action=${ghAction}, draft=${pr.draft}`); return; }
             } else if (eventName === 'pull_request_review') {
               pr = context.payload.pull_request;
               const state = context.payload.review.state.toLowerCase();
+
+              // Filter out empty review-comment events (inline comments without
+              // a formal review body) to avoid flooding the Slack thread.
+              if (state === 'commented') {
+                const reviewBody = (context.payload.review.body || '').trim();
+                if (!reviewBody) {
+                  core.info('Skipping review-commented: empty review body (inline comment only)');
+                  return;
+                }
+              }
+
               if (state === 'approved')               action = 'review-approved';
               else if (state === 'changes_requested') action = 'review-changes-requested';
               else if (state === 'commented')         action = 'review-commented';
               else { core.info(`Skipping review: state=${state}`); return; }
             }
 
+            // Skip bot-authored PRs (e.g. Dependabot, Renovate)
+            if (pr.user.type === 'Bot') {
+              core.info(`Skipping bot PR by ${pr.user.login}`);
+              return;
+            }
+
             const prNumber = pr.number;
+            const prTitle  = pr.title;
             const prUrl    = pr.html_url;
             const prAuthorLogin = pr.user.login;
             core.info(`Event: ${action}, PR #${prNumber}`);
@@ -229,6 +265,30 @@ jobs:
               return null;
             }
 
+            // ── Resolve assigned reviewers ────────────────────────────
+            // Returns an array of Slack mentions for all current PR reviewers
+            // (requested_reviewers + those who submitted reviews), excluding the author.
+            async function getReviewerMentions() {
+              const reviewerLogins = new Set();
+              for (const r of (pr.requested_reviewers || [])) {
+                if (r.login.toLowerCase() !== prAuthorLogin.toLowerCase()) reviewerLogins.add(r.login);
+              }
+              try {
+                const reviews = await github.paginate(github.rest.pulls.listReviews, {
+                  ...context.repo, pull_number: prNumber, per_page: 100,
+                });
+                for (const r of reviews) {
+                  if (r.user.login.toLowerCase() !== prAuthorLogin.toLowerCase()) reviewerLogins.add(r.user.login);
+                }
+              } catch (_) { /* ignore */ }
+
+              const mentions = [];
+              for (const login of reviewerLogins) {
+                mentions.push(await resolveToSlackMention(login) || `@${login}`);
+              }
+              return mentions;
+            }
+
             // ── Find existing Slack message for this PR ──────────────
             // Searches up to 500 messages (5 pages) of channel history.
             let existingSlackTs = '';
@@ -292,31 +352,49 @@ jobs:
             ];
 
             const STATUS = {
-              'ready':                    { emoji: ':bell:',              label: '' },
-              'converted-to-draft':       { emoji: ':pencil2:',          label: ' [Draft]' },
-              'review-approved':          { emoji: ':white_check_mark:', label: '' },
-              'review-commented':         { emoji: ':speech_balloon:',   label: '' },
-              'review-changes-requested': { emoji: ':repeat:',           label: ' [Changes Requested]' },
-              'merged':                   { emoji: ':tada:',             label: ' [Merged]' },
-              'closed':                   { emoji: ':no_entry:',         label: ' [Closed]' },
+              'ready':                    { emoji: ':bell:',              label: 'Ready for re-review' },
+              'converted-to-draft':       { emoji: ':pencil2:',          label: 'Draft' },
+              'review-approved':          { emoji: ':white_check_mark:', label: 'Approved' },
+              'review-commented':         { emoji: ':speech_balloon:',   label: 'Commented' },
+              'review-changes-requested': { emoji: ':repeat:',           label: 'Changes requested' },
+              'merged':                   { emoji: ':tada:',             label: 'Merged' },
+              'closed':                   { emoji: ':no_entry:',         label: 'Closed' },
             };
 
+            // ── Build parent message text ─────────────────────────────
+            // Format:
+            //   PR #1234 – Title
+            //   Author: @mention
+            //   Link: <url>
+            //   Assigned reviewers: @bob @carol   (only if reviewers exist)
+            function buildParentText(statusKey, authorMention, reviewerMentions) {
+              const cfg = statusKey ? STATUS[statusKey] : null;
+              const prefix = cfg ? `${cfg.emoji} ` : '';
+              const statusSuffix = cfg ? ` [${cfg.label}]` : '';
+
+              let text = `${prefix}*PR #${prNumber} – ${prTitle}${statusSuffix}*\n`;
+              text += `*Author:* ${authorMention}\n`;
+              text += `*Link:* ${prUrl}`;
+              if (reviewerMentions && reviewerMentions.length) {
+                text += `\n*Assigned reviewers:* ${reviewerMentions.join(', ')}`;
+              }
+              return text;
+            }
+
             // ── Update parent message text & reaction ────────────────
-            async function updateParentMessage(ts, statusKey, authorMention) {
+            async function updateParentMessage(ts, statusKey, authorMention, reviewerMentions) {
               const cfg = STATUS[statusKey];
               if (!cfg) return;
 
               const reaction = cfg.emoji.replace(/:/g, '');
+              const text = buildParentText(statusKey, authorMention, reviewerMentions);
 
-              // 1. Update message text with emoji prefix
-              const text = cfg.label
-                ? `${cfg.emoji} *PR by ${authorMention}${cfg.label}:* ${prUrl}`
-                : `${cfg.emoji} *PR by ${authorMention} is ready for review:* ${prUrl}`;
-
+              // 1. Update message text with new status and info
               try {
                 const r = await slackApi('chat.update', {
                   body: {
                     channel: channelId, ts, text,
+                    unfurl_links: false,
                     blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }],
                   },
                 });
@@ -339,9 +417,10 @@ jobs:
               for (const name of ALL_STATUS_REACTIONS) {
                 if (name === reaction) continue;
                 try {
-                  await slackApi('reactions.remove', {
+                  const r = await slackApi('reactions.remove', {
                     body: { channel: channelId, timestamp: ts, name },
                   });
+                  if (!r.ok && r.error !== 'no_reaction') core.warning(`reactions.remove(${name}): ${r.error}`);
                 } catch (_) { /* not present — ignore */ }
               }
             }
@@ -351,6 +430,7 @@ jobs:
               const r = await slackApi('chat.postMessage', {
                 body: {
                   channel: channelId, thread_ts: ts, text,
+                  unfurl_links: false,
                   blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }],
                 },
               });
@@ -360,12 +440,13 @@ jobs:
 
             // ── Create initial parent message ────────────────────────
             // No status emoji — "no emoji" = waiting for reviews.
-            async function createParentMessage(authorMention) {
-              const text = `*PR by ${authorMention} is ready for review:* ${prUrl}`;
+            async function createParentMessage(authorMention, reviewerMentions) {
+              const text = buildParentText(null, authorMention, reviewerMentions);
               const r = await slackApi('chat.postMessage', {
                 body: {
                   channel: channelId,
-                  text: `PR by ${authorMention} is ready for review: ${prUrl}`,
+                  text,
+                  unfurl_links: false,
                   blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }],
                 },
               });
@@ -412,24 +493,7 @@ jobs:
                 .filter(l => !l.trim().toLowerCase().startsWith('@pr-ready'))
                 .join('\n').trim();
 
-              // Gather all PR reviewers (requested + those who submitted reviews)
-              const reviewerLogins = new Set();
-              for (const r of (pr.requested_reviewers || [])) {
-                if (r.login.toLowerCase() !== prAuthorLogin.toLowerCase()) reviewerLogins.add(r.login);
-              }
-              try {
-                const reviews = await github.paginate(github.rest.pulls.listReviews, {
-                  ...context.repo, pull_number: prNumber, per_page: 100,
-                });
-                for (const r of reviews) {
-                  if (r.user.login.toLowerCase() !== prAuthorLogin.toLowerCase()) reviewerLogins.add(r.user.login);
-                }
-              } catch (_) { /* ignore */ }
-
-              const reviewerMentions = [];
-              for (const login of reviewerLogins) {
-                reviewerMentions.push(await resolveToSlackMention(login) || `@${login}`);
-              }
+              const reviewerMentions = await getReviewerMentions();
 
               let text = ':bell: PR is ready for re-review';
               if (!isSameUser) {
@@ -440,18 +504,24 @@ jobs:
               if (additionalInfo) text += `\n\n${additionalInfo}`;
 
               await postThreadReply(existingSlackTs, text);
-              await updateParentMessage(existingSlackTs, 'ready', authorMention);
+              await updateParentMessage(existingSlackTs, 'ready', authorMention, reviewerMentions);
               return;
             }
 
-            // ── PR opened or marked ready for review ─────────────────
-            if (action === 'opened' || action === 'ready-for-review') {
+            // ── PR opened, reopened, or marked ready for review ───────
+            if (action === 'opened' || action === 'reopened' || action === 'ready-for-review') {
+              // Resolve reviewers for the parent message (may be empty initially)
+              const reviewerMentions = await getReviewerMentions();
+
               if (existingSlackTs) {
-                const verb = action === 'opened' ? 'opened and is' : 'is now';
+                const verb = action === 'reopened' ? 'has been reopened and is'
+                           : action === 'opened' ? 'opened and is'
+                           : 'is now';
                 await postThreadReply(existingSlackTs, `PR ${verb} ready for review`);
-                await updateParentMessage(existingSlackTs, 'ready', authorMention);
+                // Update parent to clear any previous status and refresh reviewer list
+                await updateParentMessage(existingSlackTs, 'ready', authorMention, reviewerMentions);
               } else {
-                const ts = await createParentMessage(authorMention);
+                const ts = await createParentMessage(authorMention, reviewerMentions);
                 if (!ts) return;
                 await subscribeAuthor(ts, authorMention);
                 core.setOutput('is_new', 'true');
@@ -464,8 +534,9 @@ jobs:
             // ── Converted to draft ───────────────────────────────────
             if (action === 'converted-to-draft') {
               if (!existingSlackTs) return;
+              const reviewerMentions = await getReviewerMentions();
               await postThreadReply(existingSlackTs, ':pencil2: PR has been converted back to draft');
-              await updateParentMessage(existingSlackTs, 'converted-to-draft', authorMention);
+              await updateParentMessage(existingSlackTs, 'converted-to-draft', authorMention, reviewerMentions);
               return;
             }
 
@@ -480,23 +551,28 @@ jobs:
                 'review-commented':         `:speech_balloon: ${mention} reviewed this PR — *commented*`,
               };
               await postThreadReply(existingSlackTs, msgs[action]);
-              await updateParentMessage(existingSlackTs, action, authorMention);
+              // Re-fetch reviewers so the parent message stays up to date
+              // (a new reviewer may have just submitted their first review)
+              const reviewerMentions = await getReviewerMentions();
+              await updateParentMessage(existingSlackTs, action, authorMention, reviewerMentions);
               return;
             }
 
             // ── Merged ───────────────────────────────────────────────
             if (action === 'merged') {
               if (!existingSlackTs) return;
+              const reviewerMentions = await getReviewerMentions();
               await postThreadReply(existingSlackTs, ':tada: PR has been merged');
-              await updateParentMessage(existingSlackTs, 'merged', authorMention);
+              await updateParentMessage(existingSlackTs, 'merged', authorMention, reviewerMentions);
               return;
             }
 
             // ── Closed (not merged) ──────────────────────────────────
             if (action === 'closed') {
               if (!existingSlackTs) return;
+              const reviewerMentions = await getReviewerMentions();
               await postThreadReply(existingSlackTs, ':no_entry: PR has been closed');
-              await updateParentMessage(existingSlackTs, 'closed', authorMention);
+              await updateParentMessage(existingSlackTs, 'closed', authorMention, reviewerMentions);
               return;
             }
 
