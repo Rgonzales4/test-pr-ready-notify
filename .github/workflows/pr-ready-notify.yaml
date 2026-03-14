@@ -41,6 +41,7 @@ jobs:
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
@@ -88,6 +89,43 @@ jobs:
               }
 
               return res.json();
+            }
+
+            // ── LLM summarization helper ──────────────────────────────
+            // Calls Claude to produce a concise summary of review/comment
+            // text. Returns null if no API key, empty text, or on failure.
+            const anthropicKey = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+
+            async function summarizeText(text) {
+              if (!anthropicKey || !text || !text.trim()) return null;
+              try {
+                const res = await fetch('https://api.anthropic.com/v1/messages', {
+                  method: 'POST',
+                  headers: {
+                    'Authorization': `Bearer ${anthropicKey}`,
+                    'anthropic-version': '2023-06-01',
+                    'Content-Type': 'application/json',
+                  },
+                  body: JSON.stringify({
+                    model: 'claude-haiku-4-5-20251001',
+                    max_tokens: 256,
+                    messages: [{
+                      role: 'user',
+                      content: `Summarize the following PR review comment in 1-2 concise sentences for a Slack notification. Keep it short and to the point. Do not use markdown formatting. If the text is already short enough (one sentence), just return it as-is.\n\n${text}`,
+                    }],
+                  }),
+                });
+                if (!res.ok) {
+                  core.warning(`Claude API returned ${res.status}`);
+                  return null;
+                }
+                const data = await res.json();
+                const summary = data.content?.[0]?.text?.trim();
+                return summary || null;
+              } catch (e) {
+                core.warning(`Claude summarization failed: ${e.message}`);
+                return null;
+              }
             }
 
             // ── Determine event type & PR info ───────────────────────
@@ -503,7 +541,12 @@ jobs:
                 text += ` (requested by ${who})`;
               }
               if (reviewerMentions.length) text += `\ncc ${reviewerMentions.join(', ')}`;
-              if (additionalInfo) text += `\n\n${additionalInfo}`;
+
+              // Summarize any additional text the user included with @pr-ready
+              if (additionalInfo) {
+                const summary = await summarizeText(additionalInfo);
+                text += `\n\n───\n${summary || additionalInfo}`;
+              }
 
               await postThreadReply(existingSlackTs, text);
               await updateParentMessage(existingSlackTs, 'ready', authorMention, reviewerMentions);
@@ -552,7 +595,16 @@ jobs:
                 'review-changes-requested': `:repeat: ${mention} reviewed this PR — *requested changes*`,
                 'review-commented':         `:speech_balloon: ${mention} reviewed this PR — *commented*`,
               };
-              await postThreadReply(existingSlackTs, msgs[action]);
+              let text = msgs[action];
+
+              // Summarize the review body if present
+              const reviewBody = (context.payload.review.body || '').trim();
+              if (reviewBody) {
+                const summary = await summarizeText(reviewBody);
+                text += `\n\n───\n${summary || reviewBody}`;
+              }
+
+              await postThreadReply(existingSlackTs, text);
               // Re-fetch reviewers so the parent message stays up to date
               // (a new reviewer may have just submitted their first review)
               const reviewerMentions = await getReviewerMentions();

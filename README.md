@@ -53,6 +53,19 @@ The parent message text is updated with an emoji prefix reflecting the latest ev
 | Merged | `:tada: PR has been merged` |
 | Closed | `:no_entry: PR has been closed` |
 
+### Comment/review summarization
+
+When a review is submitted with a body, or an `@pr-ready` comment includes additional text, the workflow uses Claude (Haiku) to generate a 1-2 sentence summary. The summary appears below the main notification, separated by a divider:
+
+```
+:white_check_mark: @reviewer reviewed this PR — approved
+
+───
+Looks good overall, just a minor suggestion on the error handling path.
+```
+
+If the `CLAUDE_CODE_OAUTH_TOKEN` secret is not set, the raw text is shown instead.
+
 ### When the workflow skips
 
 For `@pr-ready` comments, the bot posts a PR comment and does **not** notify Slack if:
@@ -110,6 +123,7 @@ GitHub-hosted runners (required for `ubuntu-latest`) aren't available on private
 |--------|----------|-------------|
 | `SLACK_BOT_TOKEN` | Yes | The `xoxb-...` Bot User OAuth Token from step 1 |
 | `SLACK_CHANNEL_ID` | Yes | Channel ID (right-click channel → View channel details → copy ID at bottom) |
+| `CLAUDE_CODE_OAUTH_TOKEN` | No | Anthropic API key for LLM-powered comment/review summarization. If omitted, raw text is shown instead. |
 
 ### 3. Pin the user mapping message
 
