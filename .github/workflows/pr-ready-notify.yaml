@@ -36,17 +36,71 @@ jobs:
       id-token: write
 
     steps:
+      # ── Step 1: Extract text that may need summarization ──────
+      # Lightweight step that pulls out review body or @pr-ready
+      # additional text so it can be summarized before posting.
+      - name: Extract text to summarize
+        id: extract
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const eventName = context.eventName;
+
+            if (eventName === 'pull_request_review') {
+              // Skip bot reviews
+              if (context.payload.review.user.type === 'Bot') return;
+              const body = (context.payload.review.body || '').trim();
+              if (body) {
+                core.setOutput('text', body);
+                core.info(`Extracted review body (${body.length} chars)`);
+              }
+            } else if (eventName === 'issue_comment') {
+              const commentBody = context.payload.comment.body || '';
+              if (!commentBody.toLowerCase().includes('@pr-ready')) return;
+              // Extract everything that isn't the @pr-ready line itself
+              const additional = commentBody
+                .split('\n')
+                .filter(l => !l.trim().toLowerCase().startsWith('@pr-ready'))
+                .join('\n').trim();
+              if (additional) {
+                core.setOutput('text', additional);
+                core.info(`Extracted @pr-ready additional text (${additional.length} chars)`);
+              }
+            }
+
+      # ── Step 2: Summarize with Claude (if there's text) ───────
+      - name: Checkout for Claude Code Action
+        if: steps.extract.outputs.text != ''
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Summarize with Claude
+        id: summarize
+        if: steps.extract.outputs.text != ''
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            Summarize the following PR review comment in 1-2 concise sentences for a Slack notification. Keep it short and to the point. Do not use markdown formatting. If the text is already short enough (one sentence), just return it as-is. Return ONLY the summary text, nothing else.
+
+            ${{ steps.extract.outputs.text }}
+
+      # ── Step 3: Main Slack notification ───────────────────────
       - name: PR lifecycle Slack notification
         id: slack-notify
         uses: actions/github-script@v7
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          LLM_SUMMARY: ${{ steps.summarize.outputs.result }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const slackToken = process.env.SLACK_BOT_TOKEN;
             const channelId = process.env.SLACK_CHANNEL_ID;
+            const llmSummary = (process.env.LLM_SUMMARY || '').trim();
 
             // ── Slack API helper ─────────────────────────────────────
             // Wraps fetch with auth header, scope diagnostics on first
@@ -363,6 +417,12 @@ jobs:
               'closed':                   { emoji: ':no_entry:',         label: 'Closed' },
             };
 
+            // ── Helper: append summary divider to message text ───────
+            function appendSummary(text) {
+              if (llmSummary) return `${text}\n\n───\n${llmSummary}`;
+              return text;
+            }
+
             // ── Build parent message text ─────────────────────────────
             // Format:
             //   PR #1234 – Title
@@ -491,10 +551,6 @@ jobs:
 
               const commenterLogin = context.payload.comment.user.login;
               const isSameUser = prAuthorLogin.toLowerCase() === commenterLogin.toLowerCase();
-              const additionalInfo = context.payload.comment.body
-                .split('\n')
-                .filter(l => !l.trim().toLowerCase().startsWith('@pr-ready'))
-                .join('\n').trim();
 
               const reviewerMentions = await getReviewerMentions();
 
@@ -505,15 +561,11 @@ jobs:
               }
               if (reviewerMentions.length) text += `\ncc ${reviewerMentions.join(', ')}`;
 
-              const replyTs = await postThreadReply(existingSlackTs, text);
-              await updateParentMessage(existingSlackTs, 'ready', authorMention, reviewerMentions);
+              // Append LLM summary of any additional text from the @pr-ready comment
+              text = appendSummary(text);
 
-              // Output raw text for LLM summarization in a follow-up step
-              if (additionalInfo && replyTs) {
-                core.setOutput('summary_input', additionalInfo);
-                core.setOutput('reply_ts', replyTs);
-                core.setOutput('thread_ts', existingSlackTs);
-              }
+              await postThreadReply(existingSlackTs, text);
+              await updateParentMessage(existingSlackTs, 'ready', authorMention, reviewerMentions);
               return;
             }
 
@@ -559,19 +611,15 @@ jobs:
                 'review-changes-requested': `:repeat: ${mention} reviewed this PR — *requested changes*`,
                 'review-commented':         `:speech_balloon: ${mention} reviewed this PR — *commented*`,
               };
-              const replyTs = await postThreadReply(existingSlackTs, msgs[action]);
+
+              // Append LLM summary of the review body if present
+              const text = appendSummary(msgs[action]);
+
+              await postThreadReply(existingSlackTs, text);
               // Re-fetch reviewers so the parent message stays up to date
               // (a new reviewer may have just submitted their first review)
               const reviewerMentions = await getReviewerMentions();
               await updateParentMessage(existingSlackTs, action, authorMention, reviewerMentions);
-
-              // Output review body for LLM summarization in a follow-up step
-              const reviewBody = (context.payload.review.body || '').trim();
-              if (reviewBody && replyTs) {
-                core.setOutput('summary_input', reviewBody);
-                core.setOutput('reply_ts', replyTs);
-                core.setOutput('thread_ts', existingSlackTs);
-              }
               return;
             }
 
@@ -611,67 +659,3 @@ jobs:
               issue_number: prNumber,
               body: `<!-- slack-notify-ts:${slackTs} -->\n:white_check_mark: Slack notification sent to *#${channelName}*.`,
             });
-
-      # ── LLM summarization of review/comment text ──────────────
-      # Uses claude-code-action (which handles OAuth token natively)
-      # to summarize the raw text, then updates the Slack reply.
-      - name: Checkout for Claude Code Action
-        if: steps.slack-notify.outputs.summary_input != ''
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: Summarize with Claude
-        id: summarize
-        if: steps.slack-notify.outputs.summary_input != ''
-        uses: anthropics/claude-code-action@v1
-        with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          prompt: |
-            Summarize the following PR review comment in 1-2 concise sentences for a Slack notification. Keep it short and to the point. Do not use markdown formatting. If the text is already short enough (one sentence), just return it as-is. Return ONLY the summary text, nothing else.
-
-            ${{ steps.slack-notify.outputs.summary_input }}
-
-      - name: Update Slack reply with summary
-        if: steps.summarize.outputs.result != ''
-        uses: actions/github-script@v7
-        env:
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
-          SUMMARY: ${{ steps.summarize.outputs.result }}
-          REPLY_TS: ${{ steps.slack-notify.outputs.reply_ts }}
-          THREAD_TS: ${{ steps.slack-notify.outputs.thread_ts }}
-        with:
-          script: |
-            const slackToken = process.env.SLACK_BOT_TOKEN;
-            const channelId = process.env.SLACK_CHANNEL_ID;
-            const summary = process.env.SUMMARY.trim();
-            const replyTs = process.env.REPLY_TS;
-
-            if (!summary || !replyTs) return;
-
-            // Fetch the current reply text so we can append the summary
-            const getRes = await fetch(
-              `https://slack.com/api/conversations.replies?channel=${channelId}&ts=${replyTs}&limit=1`,
-              { headers: { Authorization: `Bearer ${slackToken}` } }
-            );
-            const getData = await getRes.json();
-            const currentText = getData.messages?.[0]?.text || '';
-
-            const updatedText = `${currentText}\n\n───\n${summary}`;
-
-            const updateRes = await fetch('https://slack.com/api/chat.update', {
-              method: 'POST',
-              headers: {
-                Authorization: `Bearer ${slackToken}`,
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify({
-                channel: channelId,
-                ts: replyTs,
-                text: updatedText,
-                blocks: [{ type: 'section', text: { type: 'mrkdwn', text: updatedText } }],
-              }),
-            });
-            const updateData = await updateRes.json();
-            if (!updateData.ok) core.warning(`Failed to update reply with summary: ${updateData.error}`);
