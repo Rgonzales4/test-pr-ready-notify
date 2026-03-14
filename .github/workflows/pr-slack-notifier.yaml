@@ -485,6 +485,7 @@ jobs:
               const reaction = cfg.emoji.replace(/:/g, '');
               const text = buildParentText(statusKey, authorMention, reviewerMentions);
 
+              // 1. Update message text with new status and info
               try {
                 const r = await slackApi('chat.update', {
                   body: {
@@ -498,6 +499,7 @@ jobs:
                 core.warning(`chat.update threw: ${e.message}`);
               }
 
+              // 2. Add the current status reaction
               try {
                 const r = await slackApi('reactions.add', {
                   body: { channel: channelId, timestamp: ts, name: reaction },
@@ -507,6 +509,7 @@ jobs:
                 core.warning(`reactions.add(${reaction}) threw: ${e.message}`);
               }
 
+              // 3. Remove all other bot-managed status reactions (in parallel)
               const removals = ALL_STATUS_REACTIONS
                 .filter(name => name !== reaction)
                 .map(name =>
@@ -533,6 +536,7 @@ jobs:
             }
 
             // ── Create initial parent message ────────────────────────
+            // No status emoji — "no emoji" = waiting for reviews.
             async function createParentMessage(authorMention, reviewerMentions) {
               const text = buildParentText(null, authorMention, reviewerMentions);
               const r = await slackApi('chat.postMessage', {
@@ -569,7 +573,9 @@ jobs:
             const authorMention = await resolveToSlackMention(prAuthorLogin) || `@${prAuthorLogin}`;
 
             // ── @pr-ready comment ────────────────────────────────────
+            // Posts a re-review notice and mentions all PR reviewers.
             if (action === 'pr-ready-comment') {
+              // If no Slack thread exists yet, create the parent message first
               if (!existingSlackTs) {
                 const reviewerMentions = await getReviewerMentions();
                 const ts = await createParentMessage(authorMention, reviewerMentions);
@@ -599,6 +605,7 @@ jobs:
 
             // ── PR opened, reopened, or marked ready for review ───────
             if (action === 'opened' || action === 'reopened' || action === 'ready-for-review') {
+              // Resolve reviewers for the parent message (may be empty initially)
               const reviewerMentions = await getReviewerMentions();
 
               if (existingSlackTs) {
@@ -606,6 +613,7 @@ jobs:
                            : action === 'opened' ? 'opened and is'
                            : 'is now';
                 await postThreadReply(existingSlackTs, `PR ${verb} ready for review`);
+                // Update parent to clear any previous status and refresh reviewer list
                 await updateParentMessage(existingSlackTs, 'ready', authorMention, reviewerMentions);
               } else {
                 const ts = await createParentMessage(authorMention, reviewerMentions);
@@ -641,6 +649,8 @@ jobs:
               const text = appendSummary(msgs[action]);
 
               await postThreadReply(existingSlackTs, text);
+              // Re-fetch reviewers so the parent message stays up to date
+              // (a new reviewer may have just submitted their first review)
               const reviewerMentions = await getReviewerMentions();
               await updateParentMessage(existingSlackTs, action, authorMention, reviewerMentions);
               return;
