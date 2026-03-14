@@ -40,14 +40,14 @@ jobs:
       # Lightweight step that pulls out review body or @pr-ready
       # additional text so it can be summarized before posting.
       # Extract text and decide if LLM summarization is needed.
-      # Short text (≤150 chars) is used as-is to skip the slow Claude step.
+      # Short text (≤500 chars) is used as-is to skip the slow Claude step.
       - name: Extract text to summarize
         id: extract
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const MAX_SHORT = 150;
+            const MAX_SHORT = 500;
             const eventName = context.eventName;
             let raw = '';
 
