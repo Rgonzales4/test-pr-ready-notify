@@ -36,7 +36,15 @@ jobs:
       id-token: write
 
     steps:
-      # ── Step 1: Extract text that may need summarization ──────
+      # ── Step 1: Checkout ───────────────────────────────────────
+      # Always runs first so scripts are present on the runner for
+      # all subsequent steps, regardless of whether Claude is invoked.
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # ── Step 2: Extract text that may need summarization ───────
       # Lightweight step that pulls out review body or "/pr-ready"
       # additional text so it can be summarized before posting.
       - name: Extract text to summarize
@@ -71,13 +79,7 @@ jobs:
               }
             }
 
-      # ── Step 2: Summarize with Claude (if there's text) ───────
-      - name: Checkout for Claude Code Action
-        if: steps.extract.outputs.text != '' && steps.extract.outputs.length >= 500
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
+      # ── Step 3: Summarize with Claude (if there's text) ────────
       - name: Summarize with Claude
         id: summarize
         continue-on-error: true
@@ -94,16 +96,7 @@ jobs:
         if: steps.summarize.outcome == 'failure'
         run: echo "Claude summarization failed — falling back to raw text"
 
-      # ── Step 3: Checkout scripts ───────────────────────────────
-      # The checkout above only runs when Claude summarization is needed.
-      # This step ensures scripts are always present for Step 4.
-      - name: Checkout scripts
-        if: steps.extract.outputs.length < 500 || steps.extract.outputs.text == ''
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      # ── Step 4: Main Slack notification ───────────────────────
+      # ── Step 4: Main Slack notification ────────────────────────
       - name: PR lifecycle Slack notification
         id: slack-notify
         uses: actions/github-script@v7
@@ -119,7 +112,9 @@ jobs:
             const run = require('./.github/scripts/pr-slack-notifier/index.js');
             await run({ github, context, core });
 
-      # Post a confirmation comment on the PR linking to the Slack thread
+      # ── Step 5: Comment on PR with Slack reference ─────────────
+      # Posts a confirmation comment linking to the Slack thread,
+      # only when a brand-new parent message was just created.
       - name: Comment on PR with Slack reference
         if: steps.slack-notify.outputs.is_new == 'true'
         uses: actions/github-script@v7
