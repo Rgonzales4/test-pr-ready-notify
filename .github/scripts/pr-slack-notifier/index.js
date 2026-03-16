@@ -20,10 +20,10 @@
 
 'use strict';
 
-const { makeSlackApi } = require('./slack-api');
-const { makeUserResolver } = require('./user-resolve');
-const { makeSlackActions } = require('./slack-actions');
-const { findExistingSlackMessage } = require('./find-slack-message');
+const { makeSlackApi } = require('./utils/slack-api');
+const { makeUserResolver } = require('./utils/user-resolve');
+const { makeSlackActions } = require('./utils/slack-actions');
+const { findExistingSlackMessage } = require('./core/find-slack-message');
 const {
   handlePrReadyComment,
   handlePrOpened,
@@ -31,7 +31,7 @@ const {
   handleReview,
   handleMerged,
   handleClosed,
-} = require('./event-handlers');
+} = require('./core/event-handlers');
 
 /**
  * Main entry point. Called with the standard github-script context.

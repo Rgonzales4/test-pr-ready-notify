@@ -21,7 +21,7 @@
 
 'use strict';
 
-const { appendSummary } = require('./message-builder');
+const { appendSummary } = require('../utils/message-builder');
 
 // ── "/pr-ready" comment ───────────────────────────────────────────────────
 
@@ -47,12 +47,12 @@ async function handlePrReadyComment(deps) {
   const guards = {
     merged: pr.merged,
     closed: pr.state === 'closed',
-    draft:  pr.draft,
+    draft: pr.draft,
   };
   const msgs = {
     merged: '> [!WARNING]\n> This PR has already been merged. No further review is needed.',
     closed: '> [!WARNING]\n> This PR is currently closed. PR review has not been requested.',
-    draft:  '> [!WARNING]\n> This PR is currently marked as *Draft*.\n> Convert to ready-for-review first.',
+    draft: '> [!WARNING]\n> This PR is currently marked as *Draft*.\n> Convert to ready-for-review first.',
   };
   for (const [key, cond] of Object.entries(guards)) {
     if (cond) {
@@ -112,8 +112,8 @@ async function handlePrOpened(action, deps) {
 
   if (existingSlackTs) {
     const verb = action === 'reopened' ? 'has been reopened and is'
-               : action === 'opened'   ? 'opened and is'
-               : 'is now';
+      : action === 'opened' ? 'opened and is'
+        : 'is now';
     await actions.postThreadReply(existingSlackTs, `:bell: PR ${verb} ready for review`);
     await actions.updateParentMessage(existingSlackTs, 'ready', authorMention, reviewerMentions);
     return { isNew: false, slackTs: existingSlackTs, channelName };
@@ -162,9 +162,9 @@ async function handleReview(action, deps) {
   const mention = (await resolver.resolveToSlackMention(reviewer)) || `@${reviewer}`;
 
   const templates = {
-    'review-approved':          `:white_check_mark: ${mention} reviewed this PR — *approved*`,
+    'review-approved': `:white_check_mark: ${mention} reviewed this PR — *approved*`,
     'review-changes-requested': `:repeat: ${mention} reviewed this PR — *requested changes*`,
-    'review-commented':         `:speech_balloon: ${mention} reviewed this PR — *commented*`,
+    'review-commented': `:speech_balloon: ${mention} reviewed this PR — *commented*`,
   };
 
   const text = appendSummary({ baseText: templates[action], ...summarize });
