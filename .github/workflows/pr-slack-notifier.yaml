@@ -117,18 +117,10 @@ jobs:
       # only when a brand-new parent message was just created.
       - name: Comment on PR with Slack reference
         if: steps.slack-notify.outputs.is_new == 'true'
-        uses: actions/github-script@v7
-        env:
-          CHANNEL_NAME: ${{ steps.slack-notify.outputs.channel_name }}
-          SLACK_TS: ${{ steps.slack-notify.outputs.slack_ts }}
+        uses: peter-evans/create-or-update-comment@v4
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const channelName = process.env.CHANNEL_NAME;
-            const slackTs = process.env.SLACK_TS;
-            const prNumber = context.issue?.number || context.payload.pull_request?.number;
-            await github.rest.issues.createComment({
-              ...context.repo,
-              issue_number: prNumber,
-              body: `<!-- slack-notify-ts:${slackTs} -->\n:white_check_mark: Slack notification sent to *#${channelName}*.`,
-            });
+          token: ${{ secrets.GITHUB_TOKEN }}
+          issue-number: ${{ github.event.pull_request.number || github.event.issue.number }}
+          body: |
+            <!-- slack-notify-ts:${{ steps.slack-notify.outputs.slack_ts }} -->
+            :white_check_mark: Slack notification sent to *#${{ steps.slack-notify.outputs.channel_name }}*.
