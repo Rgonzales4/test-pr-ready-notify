@@ -59,7 +59,7 @@ jobs:
             } else if (eventName === 'issue_comment') {
               const commentBody = context.payload.comment.body || '';
               if (!commentBody.toLowerCase().includes('/pr-ready')) return;
-              // Extract everything that isn't the /pr-ready line itself
+              // Extract everything that isn't the "/pr-ready" line itself
               const additional = commentBody
                 .split('\n')
                 .filter(l => !l.trim().toLowerCase().startsWith('/pr-ready'))
