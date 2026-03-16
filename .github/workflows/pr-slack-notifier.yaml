@@ -23,7 +23,7 @@ jobs:
     if: >-
       (github.event_name == 'issue_comment' &&
        github.event.issue.pull_request != null &&
-       contains(github.event.comment.body, '@pr-ready')) ||
+       contains(github.event.comment.body, '/pr-ready')) ||
       github.event_name == 'pull_request' ||
       github.event_name == 'pull_request_review'
 
@@ -37,7 +37,7 @@ jobs:
 
     steps:
       # ── Step 1: Extract text that may need summarization ──────
-      # Lightweight step that pulls out review body or @pr-ready
+      # Lightweight step that pulls out review body or "/pr-ready"
       # additional text so it can be summarized before posting.
       - name: Extract text to summarize
         id: extract
@@ -58,16 +58,16 @@ jobs:
               }
             } else if (eventName === 'issue_comment') {
               const commentBody = context.payload.comment.body || '';
-              if (!commentBody.toLowerCase().includes('@pr-ready')) return;
-              // Extract everything that isn't the @pr-ready line itself
+              if (!commentBody.toLowerCase().includes('/pr-ready')) return;
+              // Extract everything that isn't the /pr-ready line itself
               const additional = commentBody
                 .split('\n')
-                .filter(l => !l.trim().toLowerCase().startsWith('@pr-ready'))
+                .filter(l => !l.trim().toLowerCase().startsWith('/pr-ready'))
                 .join('\n').trim();
               if (additional) {
                 core.setOutput('text', additional);
                 core.setOutput('length', additional.length.toString());
-                core.info(`Extracted @pr-ready additional text (${additional.length} chars)`);
+                core.info(`Extracted /pr-ready additional text (${additional.length} chars)`);
               }
             }
 
@@ -206,7 +206,7 @@ jobs:
             const prAuthorLogin = pr.user.login;
             core.info(`Event: ${action}, PR #${prNumber}`);
 
-            // ── @pr-ready: guard against invalid PR states ───────────
+            // ── "/pr-ready": guard against invalid PR states ───────────
             if (action === 'pr-ready-comment') {
               const guards = {
                 merged: pr.merged,
@@ -572,7 +572,7 @@ jobs:
             // ══════════════════════════════════════════════════════════
             const authorMention = await resolveToSlackMention(prAuthorLogin) || `@${prAuthorLogin}`;
 
-            // ── @pr-ready comment ────────────────────────────────────
+            // ── "/pr-ready" comment ────────────────────────────────────
             // Posts a re-review notice and mentions all PR reviewers.
             if (action === 'pr-ready-comment') {
               // If no Slack thread exists yet, create the parent message first
