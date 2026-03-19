@@ -2,13 +2,17 @@
 
 Test repo for the PR lifecycle Slack notification workflow.
 
+## Why a separate repo?
+
+GitHub-hosted runners (required for `ubuntu-latest`) aren't available on private repos under the free plan. This public repo allows the workflow to run without self-hosted runner infrastructure.
+
 # `pr-slack-notifier` Workflow
 
 ## What it does
 
 The `pr-slack-notifier` workflow keeps a Slack channel synchronized with pull request activity by creating one Slack message per PR and posting all lifecycle updates as thread replies, allowing the entire review process to be tracked in a single place. 
 
-It notifies the team when a PR is ready for review, when reviews are submitted, when re-review is requested via `@pr-ready`, and when the PR’s status changes (draft, approved, merged, or closed), while updating the parent message with an emoji that reflects the current state. This approach reduces Slack noise and provides a clear, threaded timeline of the PR review lifecycle.
+It notifies the team when a PR is ready for review, when reviews are submitted, when re-review is requested via `/pr-ready` or GitHub’s "re-request review" button, and when the PR’s status changes (draft, approved, merged, or closed), while updating the parent message with an emoji that reflects the current state. This approach reduces Slack noise and provides a clear, threaded timeline of the PR review lifecycle.
 
 ### Parent message format
 
@@ -26,7 +30,7 @@ The "Assigned reviewers" line only appears when reviewers are assigned, and upda
 1. **PR opened** (non-draft), **reopened**, or **marked ready for review** → Slack message posted to channel, PR author subscribed to thread
 2. **Reviewer** reacts with :eyes: on the Slack message to indicate they're reviewing
 3. **Review submitted** → thread reply posted: `@reviewer reviewed this PR — approved / requested changes / commented`
-4. **PR author** makes changes, then comments `@pr-ready` → thread reply notifies all PR reviewers it's ready for re-review
+4. **PR author** makes changes, then comments `/pr-ready` or clicks **re-request review** on GitHub → thread reply notifies reviewers it's ready for review
 5. **PR merged / closed / converted to draft** → thread reply with corresponding status
 
 ### Parent message status
@@ -36,7 +40,7 @@ The parent message text is updated with an emoji prefix reflecting the latest ev
 | Status | Emoji | When |
 |--------|-------|------|
 | Waiting for reviews | _(none)_ | Initial state when PR is opened |
-| Ready for re-review | :bell: | `@pr-ready` comment posted |
+| Ready for review | :bell: | `/pr-ready` comment or re-request review |
 | Converted to draft | :pencil2: | PR converted back to draft |
 | Approved | :white_check_mark: | Review submitted — approved |
 | Changes requested | :repeat: | Review submitted — changes requested |
@@ -49,7 +53,8 @@ The parent message text is updated with an emoji prefix reflecting the latest ev
 | Event | Thread message |
 |-------|---------------|
 | PR opened / reopened / ready for review | `PR is ready for review` |
-| `@pr-ready` comment | `:bell: PR is ready for re-review` + cc's all PR reviewers |
+| `/pr-ready` comment | `:bell: PR is ready for review` + cc's all PR reviewers |
+| Re-request review (GitHub UI) | `:bell: PR is ready for review` + cc's requested reviewer |
 | Converted to draft | `:pencil2: PR has been converted back to draft` |
 | Review — approved | `:white_check_mark: @reviewer reviewed this PR — approved` |
 | Review — changes requested | `:repeat: @reviewer reviewed this PR — requested changes` |
@@ -59,7 +64,7 @@ The parent message text is updated with an emoji prefix reflecting the latest ev
 
 ### Comment/review summarization
 
-When a review is submitted with a body, or an `@pr-ready` comment includes additional text, the workflow uses Claude via [`anthropics/claude-code-action`](https://github.com/anthropics/claude-code-action) to generate a 1-2 sentence summary. The summary is appended to the Slack thread reply, separated by a divider:
+When a review is submitted with a body, or an `/pr-ready` comment includes additional text, the workflow uses Claude via [`anthropics/claude-code-action`](https://github.com/anthropics/claude-code-action) to generate a 1-2 sentence summary. The summary is appended to the Slack thread reply, separated by a divider:
 
 ```
 :white_check_mark: @reviewer reviewed this PR — approved
@@ -72,7 +77,7 @@ If the `CLAUDE_CODE_OAUTH_TOKEN` secret is not set, the summary step is skipped 
 
 ### When the workflow skips
 
-For `@pr-ready` comments, the bot posts a PR comment and does **not** notify Slack if:
+For `/pr-ready` comments, the bot posts a PR comment and does **not** notify Slack if:
 
 | Condition | Response |
 |-----------|----------|
@@ -80,9 +85,9 @@ For `@pr-ready` comments, the bot posts a PR comment and does **not** notify Sla
 | PR is closed | Warning: PR is closed |
 | PR is in draft | Warning: convert to ready-for-review first |
 
-If no Slack thread exists when `@pr-ready` is commented, one is created automatically.
+If no Slack thread exists when `/pr-ready` is commented, one is created automatically.
 
-Draft PRs do **not** trigger a Slack notification when opened. The first message is only sent when the PR is opened as non-draft or transitions from draft to ready.
+Draft PRs do **not** trigger a Slack notification when opened or when review is re-requested. The first message is only sent when the PR is opened as non-draft or transitions from draft to ready.
 
 Bot-authored reviews (e.g. automated checks) are silently skipped.
 
@@ -99,10 +104,6 @@ A concurrency group per PR number ensures that simultaneous events (e.g. merge +
 ### Rate limiting
 
 The Slack API helper automatically retries once on `429` (rate limited) responses using the `Retry-After` header.
-
-## Why a separate repo?
-
-GitHub-hosted runners (required for `ubuntu-latest`) aren't available on private repos under the free plan. This public repo allows the workflow to run without self-hosted runner infrastructure.
 
 ## Setup
 
@@ -178,8 +179,8 @@ On subsequent events, the workflow searches channel history (up to 500 messages)
 
 | Event | Types | Purpose |
 |-------|-------|---------|
-| `issue_comment` | `created` | `@pr-ready` re-review requests |
-| `pull_request` | `opened`, `reopened`, `ready_for_review`, `converted_to_draft`, `closed` | PR lifecycle |
+| `issue_comment` | `created` | `/pr-ready` re-review requests |
+| `pull_request` | `opened`, `reopened`, `ready_for_review`, `converted_to_draft`, `closed`, `review_requested` | PR lifecycle + re-request review |
 | `pull_request_review` | `submitted` | Review notifications (formal reviews only) |
 
 ### Required GitHub token permissions
@@ -213,10 +214,11 @@ These are intentionally left open — future work may involve bots legitimately 
 4. React with :eyes: on the Slack message (as a reviewer would)
 5. Submit a review (approve, request changes, or comment with a review body)
 6. Confirm thread reply with review status and parent message emoji updated
-7. Comment `@pr-ready` on the PR
+7. Comment `/pr-ready` on the PR
 8. Confirm thread reply mentioning reviewers and parent emoji changed to :bell:
-9. Convert PR to draft → confirm :pencil2: thread reply and emoji
-10. Mark ready for review → confirm thread reply and :bell: emoji
-11. Close the PR → confirm :no_entry: thread reply and emoji
-12. Reopen the PR → confirm thread reply and status update
-13. Merge → confirm :tada: thread reply and emoji
+9. Click **re-request review** on a reviewer in the GitHub sidebar → confirm thread reply with :bell: and cc of that reviewer
+10. Convert PR to draft → confirm :pencil2: thread reply and emoji
+11. Mark ready for review → confirm thread reply and :bell: emoji
+12. Close the PR → confirm :no_entry: thread reply and emoji
+13. Reopen the PR → confirm thread reply and status update
+14. Merge → confirm :tada: thread reply and emoji

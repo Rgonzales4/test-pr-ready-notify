@@ -74,7 +74,7 @@ async function run({ github, context, core }) {
     else if (ghAction === 'reopened' && !pr.draft) action = 'reopened';
     else if (ghAction === 'ready_for_review') action = 'ready-for-review';
     else if (ghAction === 'converted_to_draft') action = 'converted-to-draft';
-    else if (ghAction === 'review_requested') action = 're-request-review';
+    else if (ghAction === 'review_requested' && !pr.draft) action = 're-request-review';
     else if (ghAction === 'closed' && pr.merged) action = 'merged';
     else if (ghAction === 'closed') action = 'closed';
     else {
