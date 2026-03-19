@@ -78,7 +78,7 @@ async function handlePrReadyComment(deps) {
   const isSameUser = pr.user.login.toLowerCase() === commenterLogin.toLowerCase();
   const reviewerMentions = await resolver.getReviewerMentions();
 
-  let text = ':bell: PR is ready for re-review';
+  let text = ':bell: PR is ready for review';
   if (!isSameUser) {
     const who = (await resolver.resolveToSlackMention(commenterLogin)) || `@${commenterLogin}`;
     text += ` (requested by ${who})`;
@@ -86,6 +86,57 @@ async function handlePrReadyComment(deps) {
   if (reviewerMentions.length) text += `\ncc ${reviewerMentions.join(', ')}`;
 
   text = appendSummary({ baseText: text, ...summarize });
+
+  await actions.postThreadReply(existingSlackTs, text);
+  await actions.updateParentMessage(existingSlackTs, 'ready', authorMention, reviewerMentions);
+}
+
+// ── Re-request review (GitHub "re-request review" button) ─────────────────
+
+/**
+ * Handles the `review_requested` pull_request event, which fires when a
+ * reviewer is (re-)requested via the GitHub UI.  Behaves like `/pr-ready`
+ * but without comment text / summarization.
+ *
+ * Only posts when a Slack thread already exists — if it doesn't, the PR
+ * is brand-new and the "opened" handler will create the thread instead.
+ *
+ * @param {{
+ *   existingSlackTs: string,
+ *   actions:         object,
+ *   resolver:        object,
+ *   context:         object,
+ *   core:            object,
+ *   pr:              object,
+ *   authorMention:   string,
+ * }} deps
+ */
+async function handleReRequestReview(deps) {
+  const { existingSlackTs, actions, resolver, context, core, pr, authorMention } = deps;
+
+  if (!existingSlackTs) {
+    core.info('Skipping re-request-review: no existing Slack thread (new PR — opened handler will create it)');
+    return;
+  }
+
+  const sender = context.payload.sender.login;
+  const isSameUser = pr.user.login.toLowerCase() === sender.toLowerCase();
+
+  const requestedReviewer = context.payload.requested_reviewer;
+  const reviewerMentions = await resolver.getReviewerMentions();
+
+  let text = ':bell: PR is ready for review';
+  if (!isSameUser) {
+    const who = (await resolver.resolveToSlackMention(sender)) || `@${sender}`;
+    text += ` (requested by ${who})`;
+  }
+  if (requestedReviewer) {
+    const reviewerMention =
+      (await resolver.resolveToSlackMention(requestedReviewer.login)) || `@${requestedReviewer.login}`;
+    text += `\ncc ${reviewerMention}`;
+  } else if (reviewerMentions.length) {
+    text += `\ncc ${reviewerMentions.join(', ')}`;
+  }
 
   await actions.postThreadReply(existingSlackTs, text);
   await actions.updateParentMessage(existingSlackTs, 'ready', authorMention, reviewerMentions);
@@ -206,6 +257,7 @@ async function handleClosed(deps) {
 
 module.exports = {
   handlePrReadyComment,
+  handleReRequestReview,
   handlePrOpened,
   handleConvertedToDraft,
   handleReview,

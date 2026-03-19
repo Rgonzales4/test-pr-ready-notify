@@ -9,7 +9,7 @@ on:
   issue_comment:
     types: [created]
   pull_request:
-    types: [opened, reopened, ready_for_review, converted_to_draft, closed]
+    types: [opened, reopened, ready_for_review, converted_to_draft, closed, review_requested]
   pull_request_review:
     types: [submitted]
 

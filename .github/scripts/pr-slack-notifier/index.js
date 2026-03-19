@@ -30,6 +30,7 @@ const {
   handlePrOpened,
   handleConvertedToDraft,
   handleReview,
+  handleReRequestReview,
   handleMerged,
   handleClosed,
 } = require('./core/event-handlers');
@@ -73,6 +74,7 @@ async function run({ github, context, core }) {
     else if (ghAction === 'reopened' && !pr.draft) action = 'reopened';
     else if (ghAction === 'ready_for_review') action = 'ready-for-review';
     else if (ghAction === 'converted_to_draft') action = 'converted-to-draft';
+    else if (ghAction === 'review_requested') action = 're-request-review';
     else if (ghAction === 'closed' && pr.merged) action = 'merged';
     else if (ghAction === 'closed') action = 'closed';
     else {
@@ -168,6 +170,11 @@ async function run({ github, context, core }) {
       core.setOutput('slack_ts', result.slackTs);
       core.setOutput('channel_name', result.channelName);
     }
+    return;
+  }
+
+  if (action === 're-request-review') {
+    await handleReRequestReview(deps);
     return;
   }
 
