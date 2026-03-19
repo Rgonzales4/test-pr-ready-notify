@@ -86,6 +86,8 @@ Draft PRs do **not** trigger a Slack notification when opened. The first message
 
 Bot-authored reviews (e.g. automated checks) are silently skipped.
 
+Bot accounts are filtered from reviewer lists — they will not appear in "Assigned reviewers" or `cc` lines in Slack messages.
+
 Inline-only review comments (no formal review body) are filtered out to reduce thread noise.
 
 For other lifecycle events (review, close, merge, draft conversion), if no existing Slack thread is found, the event is silently skipped.
@@ -188,6 +190,20 @@ On subsequent events, the workflow searches channel history (up to 500 messages)
 | `pull-requests` | `write` | Read PR details, list reviews |
 | `issues` | `write` | Post comments on PR threads |
 | `id-token` | `write` | Required by `anthropics/claude-code-action` for OAuth |
+
+## Known gaps: bot handling
+
+Bot accounts are currently filtered in two places: bot-submitted reviews are skipped entirely, and bot accounts are excluded from reviewer mention lists. However, the following scenarios are **not** yet handled and will produce Slack messages that mention or are triggered by bots:
+
+| Gap | Code path | What happens today |
+|-----|-----------|--------------------|
+| Bot opens/reopens a PR | `index.js` — `pull_request` branch | A Slack thread is created with the bot as the author (e.g. "Author: @dependabot[bot]") |
+| Bot closes/merges a PR | `index.js` — `pull_request` branch (`merged` / `closed` actions) | Thread reply posted; parent message updated — bot is not mentioned directly but the event is still triggered by a bot |
+| Bot marks a PR ready for review | `index.js` — `pull_request` branch (`ready-for-review`) | Same as "bot opens a PR" — thread created with bot as author |
+| Bot converts a PR to draft | `index.js` — `pull_request` branch (`converted-to-draft`) | Thread reply posted for a bot-authored PR |
+| Bot comments `/pr-ready` | `index.js` — `issue_comment` branch | Full `/pr-ready` flow runs; if the commenter differs from the PR author, the bot appears in "requested by @bot" text (`event-handlers.js:83`) |
+
+These are intentionally left open — future work may involve bots legitimately performing these actions (e.g. Dependabot opening PRs, a CI bot flagging PRs as ready for re-review). When adding bot support for these paths, the `isBot()` helper in `utils/sanitize.js` can be used to gate behavior.
 
 ## Testing
 
