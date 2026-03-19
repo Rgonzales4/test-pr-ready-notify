@@ -25,6 +25,8 @@
 
 'use strict';
 
+const { isBot } = require('./sanitize');
+
 /**
  * @param {{ slackApi: Function, github: object, context: object, pr: object, core: object }} deps
  * @returns {object} resolver
@@ -192,6 +194,7 @@ function makeUserResolver({ slackApi, github, context, pr, core }) {
     const reviewerLogins = new Set();
 
     for (const r of pr.requested_reviewers || []) {
+      if (isBot(r.login, r.type)) continue;
       if (r.login.toLowerCase() !== prAuthorLogin.toLowerCase()) {
         reviewerLogins.add(r.login);
       }
@@ -204,6 +207,7 @@ function makeUserResolver({ slackApi, github, context, pr, core }) {
         per_page: 100,
       });
       for (const r of reviews) {
+        if (isBot(r.user.login, r.user.type)) continue;
         if (r.user.login.toLowerCase() !== prAuthorLogin.toLowerCase()) {
           reviewerLogins.add(r.user.login);
         }

@@ -12,6 +12,8 @@
 
 'use strict';
 
+const { sanitizeToPlainText } = require('./sanitize');
+
 // ── Status configuration ────────────────────────────────────────────────────
 // Maps an action key → { emoji, label } used in parent-message text and
 // as the single managed reaction on that message.
@@ -95,9 +97,12 @@ function appendSummary({ baseText, rawText = '', claudeSuccess = false, claudeRe
   let finalSummary = '';
 
   if (claudeSuccess) {
-    finalSummary = claudeResult.trim().length > 0 ? claudeResult.trim() : rawText;
+    // Sanitize Claude's output — defense in depth against prompt injection
+    // causing the LLM to return formatted/malicious content
+    const sanitizedResult = sanitizeToPlainText(claudeResult);
+    finalSummary = sanitizedResult.length > 0 ? sanitizedResult : sanitizeToPlainText(rawText);
   } else {
-    finalSummary = rawText;
+    finalSummary = sanitizeToPlainText(rawText);
   }
 
   if (finalSummary.length > 0 && finalSummary.length < 500) {

@@ -23,6 +23,7 @@
 const { makeSlackApi } = require('./utils/slack-api');
 const { makeUserResolver } = require('./utils/user-resolve');
 const { makeSlackActions } = require('./utils/slack-actions');
+const { isBot } = require('./utils/sanitize');
 const { findExistingSlackMessage } = require('./core/find-slack-message');
 const {
   handlePrReadyComment,
@@ -82,9 +83,10 @@ async function run({ github, context, core }) {
   } else if (eventName === 'pull_request_review') {
     pr = context.payload.pull_request;
 
-    // Skip bot reviews
-    if (context.payload.review.user.type === 'Bot') {
-      core.info(`Skipping bot review by ${context.payload.review.user.login}`);
+    // Skip bot reviews (type === 'Bot' or known bot login patterns)
+    const reviewUser = context.payload.review.user;
+    if (isBot(reviewUser.login, reviewUser.type)) {
+      core.info(`Skipping bot review by ${reviewUser.login}`);
       return;
     }
 
